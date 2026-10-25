@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {buildNewsQuery,isNewsDate} from '../src/news-format.js';
 
-const base=(process.argv[2] || 'http://127.0.0.1:5190').replace(/\/$/,'');
+const base=(process.argv[2] || 'http://127.0.0.1:5196').replace(/\/$/,'');
 async function read(path){
   const start=Date.now();
   const response=await fetch(base+path,{headers:{Host:'songuu.top'},signal:AbortSignal.timeout(90000)});

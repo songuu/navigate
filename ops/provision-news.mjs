@@ -20,7 +20,7 @@ if(roles.trim())throw new Error('Navigate roles already exist without credential
 if(psql("SELECT datname FROM pg_database WHERE datname='navigate';").trim())throw new Error('An existing navigate database was not created by this migration; refusing to modify it.');
 psql(`CREATE ROLE navigate_readonly LOGIN PASSWORD '${reader}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;\nCREATE ROLE navigate_writer LOGIN PASSWORD '${writer}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;\nSELECT 'CREATE DATABASE navigate' WHERE NOT EXISTS(SELECT FROM pg_database WHERE datname='navigate')\n\\gexec\n`);
 const common={CONTENT_REPOSITORY_DRIVER:'postgres',CONTENT_REPOSITORY_POSTGRES_ONLY:'true',CONTENT_POSTGRES_SSL:'false'};
-const api={...common,CONTENT_POSTGRES_READ_URL:`postgresql://navigate_readonly:${reader}@127.0.0.1:5432/navigate`,CONTENT_API_ENABLED:'1',CONTENT_API_HOST:'127.0.0.1',CONTENT_API_PORT:'5190',CONTENT_API_ALLOWED_HOSTS:'songuu.top,127.0.0.1:5190,localhost:5190',CONTENT_API_ALLOWED_ORIGINS:'https://songuu.top',CONTENT_API_ALLOW_MISSING_ORIGIN:'true'};
+const api={...common,CONTENT_POSTGRES_READ_URL:`postgresql://navigate_readonly:${reader}@127.0.0.1:5432/navigate`,CONTENT_API_ENABLED:'1',CONTENT_API_HOST:'127.0.0.1',CONTENT_API_PORT:'5196',CONTENT_API_ALLOWED_HOSTS:'songuu.top,127.0.0.1:5196,localhost:5196',CONTENT_API_ALLOWED_ORIGINS:'https://songuu.top',CONTENT_API_ALLOW_MISSING_ORIGIN:'true'};
 const previous=parse(fs.readFileSync(old));
 const collector=Object.fromEntries(Object.entries(previous).filter(([key])=>/^(NEWS_|LLM_|ANTHROPIC_|OPENAI_|OLLAMA_)/.test(key)));
 Object.assign(collector,common,{CONTENT_POSTGRES_WRITE_URL:`postgresql://navigate_writer:${writer}@127.0.0.1:5432/navigate`,NEWS_DRY_RUN:'false',NEWS_RUN_AT_BOOT:'false'});

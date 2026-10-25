@@ -14,6 +14,13 @@ id navigate >/dev/null 2>&1 || useradd --system --home-dir /var/lib/navigate --s
 mkdir -p "$target"
 tar -xzf "$archive" -C "$target"
 cd "$target"
+if ss -lntH 'sport = :5196' | grep -q .; then
+  owned_api_pid=$(systemctl show navigate-content-api.service -p MainPID --value 2>/dev/null || true)
+  if [[ -z "$owned_api_pid" || "$owned_api_pid" == 0 ]] || ! ss -lntpH 'sport = :5196' | grep -Fq "pid=${owned_api_pid},"; then
+    echo 'Port 5196 is owned by another service; refusing deployment before database changes.' >&2
+    exit 1
+  fi
+fi
 npm ci --omit=dev --no-audit --no-fund > "$backup/npm-install.log" 2>&1
 test -s dist/index.html
 collector_state=$(systemctl show news-collector-daily.service -p ActiveState --value)
@@ -85,11 +92,11 @@ systemctl daemon-reload
 systemctl enable navigate-content-api.service
 systemctl restart navigate-content-api.service
 for attempt in $(seq 1 15); do
-  if curl -fsS -H 'Host: songuu.top' http://127.0.0.1:5190/healthz > /dev/null; then break; fi
+  if curl -fsS -H 'Host: songuu.top' http://127.0.0.1:5196/healthz > /dev/null; then break; fi
   sleep 1
 done
-curl -fsS -H 'Host: songuu.top' 'http://127.0.0.1:5190/api/content/v1/news?fields=external_id,title,collected_date&limit=1' > "$backup/api-sample.json"
-curl -fsS -H 'Host: songuu.top' 'http://127.0.0.1:5190/api/content/v1/news/calendar' > "$backup/api-calendar.json"
+curl -fsS -H 'Host: songuu.top' 'http://127.0.0.1:5196/api/content/v1/news?fields=external_id,title,collected_date&limit=1' > "$backup/api-sample.json"
+curl -fsS -H 'Host: songuu.top' 'http://127.0.0.1:5196/api/content/v1/news/calendar' > "$backup/api-calendar.json"
 node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync(process.argv[1]));if(!p.items?.length)throw new Error("No migrated article readable");console.log("Migrated article read verified")' "$backup/api-sample.json"
 cp ops/navigate.location.conf /etc/nginx/snippets/navigate.location.conf
 python3 - "$backup/nginx-default.conf" <<'PY'

@@ -22,7 +22,7 @@ GET /api/content/v1/news/calendar
 
 新应用采用 `/opt/navigate/releases/<release-id>`、`/opt/navigate/current`、`/opt/navigate/shared`。创建无登录的 `navigate` 服务账号，使它能读取 release 与仅含各自凭据的两个配置文件。`content-api.env` 和 `news-collector.env` 建议 `root:navigate 0640`；不得进入 Git、静态 dist、构建日志或前端环境变量。
 
-`ops/navigate-content-api.service` 默认内部端口由模板配置为 5190，与原 API 5180 分开。新 API 使用只读账号，新采集使用仅能写 `news_items` 的账号。示例数据库名为 `navigate`，部署时使用核实后的实际目标。
+`ops/navigate-content-api.service` 默认内部端口由模板配置为 5196，与原 API 5180 分开。新 API 使用只读账号，新采集使用仅能写 `news_items` 的账号。示例数据库名为 `navigate`，部署时使用核实后的实际目标。
 
 ## 数据库迁移
 

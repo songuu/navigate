@@ -24,7 +24,7 @@ npm run build
 npm run dev
 ```
 
-开发代理默认连接 `127.0.0.1:5198`；可通过 `CONTENT_PREVIEW_TARGET` 指定自己的只读资讯服务。开发机用 `ssh -N -L 127.0.0.1:5198:127.0.0.1:5190 Aliyun-Claw` 转发生产只读 API。
+开发代理默认连接 `127.0.0.1:5198`；可通过 `CONTENT_PREVIEW_TARGET` 指定自己的只读资讯服务。开发机用 `ssh -N -L 127.0.0.1:5198:127.0.0.1:5196 Aliyun-Claw` 转发生产只读 API。
 
 ## 书签整理
 
@@ -38,7 +38,7 @@ node scripts/bookmarks.mjs export --source '<Chrome Bookmarks 文件>'
 
 ## 部署与迁移
 
-现有服务器使用 `/opt/navigate/releases/<release>`，通过 `/opt/navigate/current` 原子切换；只读服务绑定 `127.0.0.1:5190`。新闻独立数据库为现有本机 PostgreSQL 容器内的 `navigate`，专用 reader/writer 角色，凭据仅位于服务器 `/opt/navigate/shared/*.env`。
+现有服务器使用 `/opt/navigate/releases/<release>`，通过 `/opt/navigate/current` 原子切换；只读服务绑定 `127.0.0.1:5196`。新闻独立数据库为现有本机 PostgreSQL 容器内的 `navigate`，专用 reader/writer 角色，凭据仅位于服务器 `/opt/navigate/shared/*.env`。
 
 1. 运行测试和构建，打包源码、锁文件与 `dist/`，排除私有文件、Git 与 node_modules。
 2. 上传包到现有服务器，执行 `bash ops/deploy.sh /tmp/navigate-RELEASE.tar.gz RELEASE`（可先把 `ops/` 从包解压到暂存目录）。
