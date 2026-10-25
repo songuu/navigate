@@ -1,0 +1,28 @@
+[Unit]
+Description=Collect AI news into Navigate PostgreSQL
+After=network-online.target docker.service
+Wants=network-online.target
+StartLimitIntervalSec=3h
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=navigate
+Group=navigate
+WorkingDirectory=/opt/navigate/current
+Environment=NODE_ENV=production
+Environment=CONTENT_REPOSITORY_POSTGRES_ONLY=true
+Environment=CONTENT_REPOSITORY_DRIVER=postgres
+EnvironmentFile=/opt/navigate/shared/news-collector.env
+RuntimeDirectory=navigate-news
+ExecStart=/usr/bin/flock -n /run/navigate-news/collector.lock /usr/bin/node --experimental-transform-types news-collector/src/cli-collect.ts
+Restart=on-failure
+RestartSec=15min
+TimeoutStartSec=45min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/navigate
+StandardOutput=journal
+StandardError=journal

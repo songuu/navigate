@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#f5f8fc" />
+  <meta name="description" content="Songuu 导航：整理日常所需的网站、工具与 AI 资讯，让每一次出发更轻松。" />
+  <title>Songuu 导航 · 从这里出发</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <script type="module" src="/src/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到内容</a>
+  <header class="site-header">
+    <a class="brand" href="/" aria-label="Songuu 导航首页"><span class="brand-mark">s</span><span>songuu<span class="brand-dot">.</span></span><small>轻导航</small></a>
+    <nav class="main-nav" aria-label="主导航"><a href="/" data-page="home">首页</a><a href="/news/" data-page="news">AI 资讯<span class="live-dot"></span></a><a href="/#apps" data-page="apps">我的应用</a><a href="/tools/" data-page="tools">在线工具</a></nav>
+    <div class="header-actions"><button id="theme-toggle" class="icon-button" title="切换深浅主题" aria-label="切换深浅主题">◐</button><button id="settings-open" class="icon-button" title="管理书签与偏好" aria-label="管理书签与偏好">⚙</button></div>
+  </header>
+  <main id="main"></main>
+  <footer class="site-footer"><a class="footer-brand" href="/">songuu.</a><span>把喜欢的网站，放在触手可及的地方。</span><span>© <span id="year"></span> Songuu <a href="/news/">每日 AI 资讯 ↗</a></span></footer>
+  <dialog id="settings-dialog" class="modal"><form method="dialog"><button class="dialog-close icon-button" aria-label="关闭设置">×</button></form><p class="eyebrow">MAKE IT YOURS</p><h2>你的导航，你来安排</h2><p class="muted">收藏与自定义书签保存在当前浏览器。导出一份备份，也可以带到别的设备。</p><div class="setting-row"><span>打开网站</span><label><input type="checkbox" id="open-new-tab" /> 在新标签页打开</label></div><div class="setting-row"><span>本机书签</span><button id="export-local" class="secondary-button">导出备份</button></div><div class="setting-row"><span>导入书签</span><label class="secondary-button file-label">选择 JSON / HTML<input id="import-bookmarks" type="file" accept=".json,.html,.htm" /></label></div><p class="hint">导入文件仅在本机解析。个人链接不会上传。</p><div class="setting-row"><span>将导航设为首页</span><button id="homepage-help" class="secondary-button">查看设置方式</button></div><p id="settings-message" class="status-message" role="status"></p><div id="homepage-instructions" hidden class="help-box">Chrome 设置 → 启动时 → 打开特定网页 → 添加 <strong>https://songuu.top/</strong>。在“外观”中开启主页按钮，并填写同一地址。</div></dialog>
+  <dialog id="bookmark-dialog" class="modal"><form id="bookmark-form"><button type="button" class="dialog-close icon-button" id="bookmark-cancel" aria-label="关闭添加书签">×</button><p class="eyebrow">A NEW DESTINATION</p><h2>添加一个好去处</h2><label>网站名称<input name="title" required maxlength="120" placeholder="例如：我的工作台" /></label><label>网址<input name="url" type="url" required placeholder="https://" /></label><label>分类<select name="category" id="bookmark-category"></select></label><p class="hint">自定义书签仅保存在这个浏览器中。</p><p id="bookmark-message" role="alert"></p><button class="primary-button" type="submit">保存书签</button></form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <noscript><p class="noscript">请开启 JavaScript 使用书签筛选与资讯阅读。<a href="/agent-build/news/">访问原资讯站</a></p></noscript>
+</body>
+</html>

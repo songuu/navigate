@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect AI news daily at 08:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1s
+Unit=navigate-news-collector.service
+
+[Install]
+WantedBy=timers.target

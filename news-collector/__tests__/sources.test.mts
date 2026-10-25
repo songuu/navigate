@@ -1,0 +1,177 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { SOURCES, enabledSources } from "../src/sources.ts";
+import { ECOSYSTEM_LAYERS } from "../src/types.ts";
+
+test("source registry keys are unique and enabled sources are well-formed", () => {
+  const keys = new Set<string>();
+  const layerSet = new Set(ECOSYSTEM_LAYERS);
+
+  for (const source of SOURCES) {
+    assert.match(source.key, /^[a-z0-9-]+$/);
+    assert.equal(keys.has(source.key), false, `duplicate source key: ${source.key}`);
+    keys.add(source.key);
+    assert.match(source.url, /^https?:\/\//);
+    if (source.layerHint) assert.equal(layerSet.has(source.layerHint), true);
+  }
+
+  assert.deepEqual(
+    enabledSources().map((source) => source.key),
+    SOURCES.filter((source) => source.enabled).map((source) => source.key),
+    "enabledSources should only return feeds marked enabled",
+  );
+  assert.ok(enabledSources().length >= 15, "expanded collector should keep broad coverage");
+});
+
+test("expanded article sources stay enabled", () => {
+  const enabled = new Set(enabledSources().map((source) => source.key));
+
+  for (const key of [
+    "vercel-ai-releases",
+    "mcp-typescript-sdk-releases",
+    "mcp-python-sdk-releases",
+    "mastra-releases",
+    "pydantic-ai-releases",
+    "browser-use-releases",
+    "stagehand-releases",
+    "openhands-releases",
+    "swe-agent-releases",
+    "aider-releases",
+    "mem0-releases",
+    "graphiti-releases",
+    "humanlayer-releases",
+    "langfuse-releases",
+    "phoenix-releases",
+    "llamaindex-python-releases",
+    "dspy-releases",
+    "ithome",
+    "sspai",
+    "deepmind",
+    "arxiv-cs-lg",
+    "hn-frontpage",
+    "github-engineering",
+    "github-changelog",
+    "microsoft-ai-source",
+    "aws-ml",
+    "nvidia-deep-learning",
+    "infoq-ai",
+    "venturebeat-ai",
+    "mit-tr",
+    "ahead-of-ai",
+  ]) {
+    assert.ok(enabled.has(key), `${key} should be enabled`);
+  }
+});
+
+test("80aj RSS stays enabled at the verified WordPress feed URL", () => {
+  const source = SOURCES.find((candidate) => candidate.key === "80aj");
+  assert.ok(source, "80aj should remain documented in the source registry");
+  assert.equal(source.name, "80aj");
+  assert.equal(source.url, "https://www.80aj.com/feed/");
+  assert.equal(source.kind, "cn-media");
+  assert.equal(source.lang, "zh");
+  assert.equal(source.enabled, true);
+});
+
+
+test("2026-07-21 live-probed official feeds stay enabled at their verified URLs", () => {
+  const expectedSources = {
+    "langchain-changelog": "https://docs.langchain.com/oss/python/releases/changelog/rss.xml",
+    "cloudflare-ai": "https://blog.cloudflare.com/tag/ai/rss/",
+    "openai-codex-releases": "https://github.com/openai/codex/releases.atom",
+    "claude-code-releases": "https://github.com/anthropics/claude-code/releases.atom",
+    "together-ai-blog": "https://www.together.ai/blog/rss.xml",
+    "gemini-cli-releases": "https://github.com/google-gemini/gemini-cli/releases.atom",
+    "weaviate-blog": "https://weaviate.io/blog/rss.xml",
+    "redhat-ai": "https://www.redhat.com/en/rss/blog/channel/artificial-intelligence",
+    "microsoft-agent-framework-releases": "https://github.com/microsoft/agent-framework/releases.atom",
+  } as const;
+  const enabled = new Map(enabledSources().map((source) => [source.key, source]));
+
+  for (const [key, url] of Object.entries(expectedSources)) {
+    const source = enabled.get(key);
+    assert.ok(source, key + " should remain enabled");
+    assert.equal(source.url, url);
+  }
+});
+
+test("2026-09-04 live-probed engineering feeds stay enabled with verified metadata", () => {
+  const expectedSources = {
+    "microsoft-research": ["https://www.microsoft.com/en-us/research/feed/", "foundation"],
+    "kubernetes-blog": ["https://kubernetes.io/feed.xml", "runtime"],
+    "meta-engineering": ["https://engineering.fb.com/feed/", "runtime"],
+    "databricks-blog": ["https://www.databricks.com/feed", "data-memory"],
+    "docker-blog": ["https://www.docker.com/blog/feed/", "runtime"],
+    "elastic-search-labs": ["https://www.elastic.co/search-labs/blog/feed", "data-memory"],
+    "wandb-fully-connected": ["https://wandb.ai/fully-connected/rss.xml", "evaluation"],
+    "mlflow-blog": ["https://mlflow.org/blog/rss.xml", "evaluation"],
+    "qdrant-articles": ["https://qdrant.tech/articles/index.xml", "data-memory"],
+    "grafana-blog": ["https://grafana.com/blog/index.xml", "evaluation"],
+    "vercel-blog": ["https://vercel.com/atom", "product-ui"],
+    "redis-blog": ["https://redis.io/blog/feed/", "data-memory"],
+  } as const;
+  const enabled = new Map(enabledSources().map((source) => [source.key, source]));
+
+  for (const [key, [url, layerHint]] of Object.entries(expectedSources)) {
+    const source = enabled.get(key);
+    assert.ok(source, `${key} should be enabled`);
+    assert.equal(source.url, url);
+    assert.equal(source.kind, "vendor-blog");
+    assert.equal(source.lang, "en");
+    assert.equal(source.layerHint, layerHint);
+  }
+});
+
+test("high-value sources have independent fallbacks for transient upstream failures", () => {
+  const expectedFallbacks = {
+    "hn-ai": "https://hnrss.org/newest?q=AI+OR+LLM+OR+agent&count=30",
+    "hn-frontpage": "https://hnrss.org/frontpage",
+    "llamaindex-python-releases": "https://github.com/run-llama/llama_index/tags.atom",
+    huggingface: "https://github.com/huggingface/transformers/releases.atom",
+    openai: "https://github.com/openai/openai-cookbook/commits/main.atom",
+  } as const;
+
+  for (const [key, fallbackUrl] of Object.entries(expectedFallbacks)) {
+    const source = SOURCES.find((candidate) => candidate.key === key);
+    assert.ok(source, `missing source: ${key}`);
+    assert.equal(source.critical, true, `${key} should retry as a critical source`);
+    const urls = [
+      ...(source.fallbackUrls ?? []),
+      ...(source.fallbacks ?? []).map((fallback) => fallback.url),
+    ];
+    assert.ok(urls.includes(fallbackUrl), `${key} should retain fallback ${fallbackUrl}`);
+  }
+});
+
+test("must-succeed daily sources use critical retry policy", () => {
+  const expectedCriticalSources = ["ithome", "hn-frontpage"] as const;
+
+  for (const key of expectedCriticalSources) {
+    const source = SOURCES.find((candidate) => candidate.key === key);
+    assert.ok(source, `missing source: ${key}`);
+    assert.equal(source.enabled, true, `${key} should stay enabled`);
+    assert.equal(source.critical, true, `${key} should notify as critical`);
+    assert.deepEqual(
+      source.retry,
+      { maxAttempts: 5, baseDelayMs: 1_000 },
+      `${key} should retry as a must-succeed source`,
+    );
+  }
+
+  const ithome = SOURCES.find((candidate) => candidate.key === "ithome");
+  assert.equal(ithome?.requestTimeoutMs, 30_000);
+
+  const hnFrontpage = SOURCES.find((candidate) => candidate.key === "hn-frontpage");
+  assert.equal(hnFrontpage?.format, "hacker-news-algolia");
+  assert.equal(hnFrontpage?.url, "https://hn.algolia.com/api/v1/search_by_date?tags=front_page&hitsPerPage=30");
+});
+
+test("challenge-protected sources stay documented but disabled", () => {
+  for (const key of ["linuxdo-latest", "36kr-feed", "techweb-it", "owasp-genai"]) {
+    const source = SOURCES.find((candidate) => candidate.key === key);
+
+    assert.ok(source, `${key} should remain documented in the source registry`);
+    assert.equal(source.enabled, false);
+    assert.equal(enabledSources().some((candidate) => candidate.key === key), false);
+  }
+});
