@@ -123,8 +123,20 @@ text=path.read_text()
 path.write_text(text.replace('  news-collector\n','  # News collection is owned by navigate-news-collector.timer.\n'))
 PY
 fi
-curl -fsS --resolve songuu.top:443:127.0.0.1 https://songuu.top/ | grep -q 'Songuu'
-curl -fsS --resolve songuu.top:443:127.0.0.1 'https://songuu.top/api/content/v1/news?fields=external_id,title,collected_date&limit=1' > /dev/null
+# Reload signals are asynchronous; under host pressure old workers can still
+# answer briefly. Check the new page identity and its real API together.
+route_ready=0
+for attempt in $(seq 1 60); do
+  if curl --noproxy '*' --max-time 5 -fsS --resolve songuu.top:443:127.0.0.1 https://songuu.top/ > "$backup/public-home.html" 2> "$backup/route-readiness.log" \
+    && grep -Fq '<title>Songuu 导航' "$backup/public-home.html" \
+    && curl --noproxy '*' --max-time 5 -fsS --resolve songuu.top:443:127.0.0.1 'https://songuu.top/api/content/v1/news?fields=external_id,title,collected_date&limit=1' > "$backup/public-api-sample.json" 2>> "$backup/route-readiness.log" \
+    && node -e 'const p=JSON.parse(require("fs").readFileSync(process.argv[1]));if(!Array.isArray(p.items)||!p.items.length)throw new Error("Public news route is not readable")' "$backup/public-api-sample.json" 2>> "$backup/route-readiness.log"; then
+    route_ready=1
+    break
+  fi
+  sleep 1
+done
+[[ "$route_ready" == 1 ]] || { echo "New Nginx routes did not become ready. See $backup/route-readiness.log" >&2; exit 1; }
 date -Is > "$base/shared/news-migrated"
 echo 'Run systemctl start navigate-news-collector.service and verify the report before enabling navigate-news-collector.timer.'
 echo "Navigation release $release active; backup $backup"
