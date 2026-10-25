@@ -28,14 +28,13 @@ npm run dev
 
 ## 书签整理
 
+本项目只读取 Chrome 书签，将分类结果呈现在网页中。当前任务不修改 Chrome 书签栏；首页地址由用户在 Chrome 设置中指定。
+
 ```sh
 node scripts/bookmarks.mjs export --source '<Chrome Bookmarks 文件>'
-node scripts/bookmarks.mjs plan --source '<Chrome Bookmarks 文件>'
-node scripts/bookmarks.mjs apply --plan .local/chrome-bookmarks.plan.json
-node scripts/bookmarks.mjs restore --source '<Chrome Bookmarks 文件>' --backup '<生成的备份文件>'
 ```
 
-`apply` 必须先关闭 Chrome。它检查源文件版本、全部链接和元数据，创建字节一致备份，再原子替换；不删除重复或私有条目。公开目录会合并重复，功能性 URL hash 保留。不要提交原始书签、`.local/`、环境文件或数据库备份。
+公开目录合并重复，功能性 URL hash 保留；内嵌文档、个人工作区和未知分享文件保留在本机导出中。设置面板可导入本机 JSON 到“本机私藏”。已确认返回 404 的原链接保留并标为“待修复”，超时或被拦截不当作失效。不要提交原始书签、`.local/`、环境文件或数据库备份。
 
 ## 部署与迁移
 

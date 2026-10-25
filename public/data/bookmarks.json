@@ -742,7 +742,12 @@
               "public": true,
               "sourceIds": [
                 "1418"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:06.647Z"
+              }
             },
             {
               "id": "2130598b29a6",
@@ -2089,7 +2094,12 @@
               "public": true,
               "sourceIds": [
                 "36"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:06.646Z"
+              }
             },
             {
               "id": "4a2bee0addb9",
@@ -2590,7 +2600,12 @@
               "public": true,
               "sourceIds": [
                 "1077"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:06.647Z"
+              }
             },
             {
               "id": "e52e66b11eb4",
@@ -2650,7 +2665,12 @@
               "public": true,
               "sourceIds": [
                 "1227"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:06.647Z"
+              }
             },
             {
               "id": "cb37374a84e5",
@@ -3355,7 +3375,12 @@
               "public": true,
               "sourceIds": [
                 "1246"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:06.647Z"
+              }
             },
             {
               "id": "49a8bd189f57",
@@ -3430,7 +3455,12 @@
               "public": true,
               "sourceIds": [
                 "1251"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:07.775Z"
+              }
             },
             {
               "id": "4e5faa9a502c",
@@ -4216,7 +4246,12 @@
               "public": true,
               "sourceIds": [
                 "1283"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:08.329Z"
+              }
             },
             {
               "id": "e99e349a8720",
@@ -4427,7 +4462,12 @@
               "public": true,
               "sourceIds": [
                 "1298"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:08.360Z"
+              }
             },
             {
               "id": "43a5f1d78dfc",
@@ -4997,7 +5037,12 @@
               "public": true,
               "sourceIds": [
                 "1233"
-              ]
+              ],
+              "health": {
+                "status": "unavailable",
+                "httpStatus": 404,
+                "checkedAt": "2026-10-25T10:35:06.647Z"
+              }
             },
             {
               "id": "05818b14399b",
@@ -5499,7 +5544,12 @@
       "public": true,
       "sourceIds": [
         "36"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:06.646Z"
+      }
     },
     {
       "id": "4a2bee0addb9",
@@ -6024,7 +6074,12 @@
       "public": true,
       "sourceIds": [
         "1418"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:06.647Z"
+      }
     },
     {
       "id": "2130598b29a6",
@@ -6579,7 +6634,12 @@
       "public": true,
       "sourceIds": [
         "1077"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:06.647Z"
+      }
     },
     {
       "id": "e52e66b11eb4",
@@ -7284,7 +7344,12 @@
       "public": true,
       "sourceIds": [
         "1227"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:06.647Z"
+      }
     },
     {
       "id": "b4fd4a5ecad5",
@@ -7374,7 +7439,12 @@
       "public": true,
       "sourceIds": [
         "1233"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:06.647Z"
+      }
     },
     {
       "id": "e66a4603c1b1",
@@ -7479,7 +7549,12 @@
       "public": true,
       "sourceIds": [
         "1246"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:06.647Z"
+      }
     },
     {
       "id": "49a8bd189f57",
@@ -7554,7 +7629,12 @@
       "public": true,
       "sourceIds": [
         "1251"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:07.775Z"
+      }
     },
     {
       "id": "4e5faa9a502c",
@@ -7974,7 +8054,12 @@
       "public": true,
       "sourceIds": [
         "1283"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:08.329Z"
+      }
     },
     {
       "id": "e99e349a8720",
@@ -8170,7 +8255,12 @@
       "public": true,
       "sourceIds": [
         "1298"
-      ]
+      ],
+      "health": {
+        "status": "unavailable",
+        "httpStatus": 404,
+        "checkedAt": "2026-10-25T10:35:08.360Z"
+      }
     },
     {
       "id": "43a5f1d78dfc",
