@@ -33,13 +33,13 @@ function articleLink(article, context = {}) {
   return `/news/?${params}`;
 }
 
-async function requestJson(url, lifetimeSignal) {
+async function requestJson(url, lifetimeSignal, timeoutMs = 12000) {
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort();
   if (lifetimeSignal.aborted) abort();
   else lifetimeSignal.addEventListener('abort', abort, {once: true});
-  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 12000);
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
     const response = await fetch(url, {signal: controller.signal, headers: {Accept: 'application/json'}});
     if (!response.ok) throw new Error(`资讯服务暂不可用（HTTP ${response.status}）`);
@@ -249,7 +249,8 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   async function loadCalendar() {
     calendarError='';
     try {
-      const payload = await requestJson(`${apiBase}/news/calendar`, lifetime.signal);
+      // The first historical aggregate is slower than a paged list on this host.
+      const payload = await requestJson(`${apiBase}/news/calendar`, lifetime.signal, 30000);
       if (lifetime.signal.aborted) return;
       if (!Array.isArray(payload.buckets) || !Array.isArray(payload.sourceCounts)) throw new Error('资讯日历暂不可用');
       calendar=payload; calendarLoaded=true;
@@ -374,7 +375,7 @@ export async function mountNewsPreview(container,{apiBase='/api/content/v1'}={})
   async function load() {
     container.replaceChildren(status('正在读取最新 AI 资讯…'));
     try {
-      const page=await requestPage(apiBase,{limit:3},lifetime.signal);
+      const page=await requestPage(apiBase,{layer:'model-platform',limit:3},lifetime.signal);
       if(lifetime.signal.aborted)return;
       container.replaceChildren();
       page.items.forEach(article=>container.append(newsRow(article,{})));
