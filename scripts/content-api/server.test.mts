@@ -84,7 +84,7 @@ test("serves compact server-aggregated news calendar buckets", async () => {
         { ecosystemLayer: "model-platform", sourceCount: 3 },
       ],
     });
-    assert.match(result.headers["cache-control"] ?? "", /max-age=300/);
+    assert.equal(result.headers["cache-control"], "no-cache");
 
     const invalid = await request(port, "/api/content/v1/news/calendar?limit=1");
     assert.equal(invalid.status, 400);
@@ -92,7 +92,7 @@ test("serves compact server-aggregated news calendar buckets", async () => {
   });
 });
 
-test("calendar cache coalesces concurrent cold reads and serves the last good value while refreshing", async () => {
+test("calendar cache coalesces concurrent cold reads and returns refreshed data to the first expired request", async () => {
   let now = 0;
   let calls = 0;
   let releaseFirst: ((value: Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>) => void) | undefined;
@@ -125,7 +125,8 @@ test("calendar cache coalesces concurrent cold reads and serves the last good va
   assert.deepEqual(await secondRead, summary);
 
   now = 101;
-  assert.deepEqual(await cache.read(), summary);
+  const expiredReads = await Promise.all([cache.read(), cache.read()]);
+  assert.deepEqual(expiredReads, [{ ...summary, buckets: [] }, { ...summary, buckets: [] }]);
   assert.equal(calls, 2);
 });
 
@@ -140,7 +141,7 @@ const newsResponseRequest: ContentReadRequest = {
 };
 const newsResponseCacheKey = "/api/content/v1/news?fields=external_id&limit=10";
 
-test("news response cache coalesces cold reads, hits, and refreshes stale successes", async () => {
+test("news response cache waits for one refresh and returns new data to the first expired visitors", async () => {
   let now = 0;
   let calls = 0;
   let markFirstStarted: (() => void) | undefined;
@@ -181,26 +182,36 @@ test("news response cache coalesces cold reads, hits, and refreshes stale succes
   assert.equal(calls, 1);
 
   now = 101;
-  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), firstPage);
+  let returnedExpiredValue = false;
+  const expiredRead = cache.read(newsResponseCacheKey, newsResponseRequest).then((value) => {
+    returnedExpiredValue = true;
+    return value;
+  });
+  const sameExpiredRead = cache.read(newsResponseCacheKey, newsResponseRequest);
   await refreshStarted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(returnedExpiredValue, false, "expired callers must wait instead of receiving the previous collection");
   assert.equal(calls, 2);
   releaseRefresh?.(refreshedPage);
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(await expiredRead, refreshedPage);
+  assert.deepEqual(await sameExpiredRead, refreshedPage);
   assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), refreshedPage);
   assert.equal(calls, 2);
 });
 
-test("news response cache retains the last success when a stale refresh fails", async () => {
+test("news response cache falls back only after refresh failure and retries on the next request", async () => {
   let now = 0;
   let calls = 0;
   const errors: unknown[] = [];
   const cachedPage = { items: [{ external_id: "cached" }], totalCount: 1, hasMore: false };
+  const recoveredPage = { items: [{ external_id: "new-collection" }], totalCount: 2, hasMore: false };
   const cache = createNewsResponseCache(
     {
       async read() {
         calls += 1;
         if (calls === 1) return cachedPage;
-        throw new Error("temporary database error");
+        if (calls === 2) throw new Error("temporary database error");
+        return recoveredPage;
       },
     },
     { ttlMs: 100, now: () => now, onError: (error) => errors.push(error) },
@@ -208,13 +219,40 @@ test("news response cache retains the last success when a stale refresh fails", 
 
   assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), cachedPage);
   now = 101;
-  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), cachedPage);
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  const failedReads = await Promise.all([
+    cache.read(newsResponseCacheKey, newsResponseRequest),
+    cache.read(newsResponseCacheKey, newsResponseRequest),
+  ]);
+  assert.deepEqual(failedReads, [cachedPage, cachedPage]);
   assert.equal(calls, 2);
   assert.equal(errors.length, 1);
 
-  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), cachedPage);
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), recoveredPage);
+  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), recoveredPage);
+  assert.equal(calls, 3);
+});
+
+test("calendar refresh failure shares the last success without caching the error or renewing its TTL", async () => {
+  let now = 0;
+  let calls = 0;
+  const errors: unknown[] = [];
+  const oldSummary = { buckets: [{ date: "2026-10-25", ecosystemLayer: "runtime", articleCount: 20_850 }], sourceCounts: [] };
+  const newSummary = { buckets: [{ date: "2026-10-25", ecosystemLayer: "runtime", articleCount: 20_923 }], sourceCounts: [] };
+  const cache = createNewsCalendarCache({
+    async readNewsCalendar() {
+      calls += 1;
+      if (calls === 1) return oldSummary;
+      if (calls === 2) throw new Error("temporary calendar failure");
+      return newSummary;
+    },
+  }, { ttlMs: 100, now: () => now, onError: (error) => errors.push(error) });
+  assert.deepEqual(await cache.read(), oldSummary);
+  now = 101;
+  assert.deepEqual(await Promise.all([cache.read(), cache.read()]), [oldSummary, oldSummary]);
+  assert.equal(calls, 2);
+  assert.equal(errors.length, 1);
+  assert.deepEqual(await cache.read(), newSummary);
+  assert.deepEqual(await cache.read(), newSummary);
   assert.equal(calls, 3);
 });
 

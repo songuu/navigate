@@ -12,7 +12,7 @@ GET /api/content/v1/news/calendar
 
 过滤为重复的 `filter=field:eq:value`，排序为重复的 `sort=field:asc|desc`。分页响应为 `{items,totalCount,hasMore}`，每页最多 1000 条；`count=none` 跳过 COUNT。日历返回 `{buckets:[{date,ecosystemLayer,articleCount}],sourceCounts:[{ecosystemLayer,sourceCount}]}`。列表与日历按 `collected_date`，不能混用 `published_date`。
 
-新闻列表、详情和日历在 API 进程内共享 60 秒新鲜期缓存；同一新闻请求的并发冷读/刷新只执行一次数据库读取。列表最多保留 128 个最近使用的查询，失败不会缓存成错误结果；过期成功值在一次后台刷新期间继续返回，数据库暂时异常时保留上次成功结果并记录错误。其它内容资源没有该缓存。重启 API 会清空缓存。
+新闻列表、详情和日历在 API 进程内共享 60 秒新鲜期缓存；同一新闻请求的并发冷读/刷新只执行一次数据库读取。列表最多保留 128 个最近使用的查询。过期首次访问等待刷新后返回新数据；数据库暂时异常时才回退上次成功结果并记录错误，不延长旧值新鲜期，下次访问继续重试。日历要求浏览器重新验证，前端请求绕过旧浏览器缓存。其它内容资源没有该缓存。重启 API 会清空缓存。
 
 对独立新库运行 `database/003-news-read-indexes.sql`，增加与前端真实排序 `(collected_date DESC, published_date DESC, external_id ASC)` 及分类筛选匹配的两个复合索引。脚本使用 `CREATE INDEX CONCURRENTLY`，必须在事务外逐条执行；失败后先核对 `pg_index.indisvalid`，移除同名无效索引再重跑，不能把 `IF NOT EXISTS` 跳过当作有效索引证据。
 

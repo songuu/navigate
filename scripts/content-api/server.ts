@@ -122,7 +122,7 @@ export function createContentApiServer(options: ContentApiServerOptions): http.S
           throw new ContentRequestError("unknown_parameter", "News calendar does not accept query parameters.");
         }
         const calendar = await newsCalendarCache.read();
-        sendJson(res, 200, calendar, "public, max-age=300, stale-while-revalidate=300");
+        sendJson(res, 200, calendar, "no-cache");
         return;
       }
       const assetRequest = parseContentAssetRequest(requestUrl);
@@ -173,9 +173,9 @@ interface CachedNewsCalendar {
 const DEFAULT_NEWS_CACHE_TTL_MS = 60_000;
 
 /**
- * Reuses one public calendar aggregate for the HTTP cache lifetime. A stale
- * successful value is served while one refresh runs in the background, which
- * keeps read availability intact when PostgreSQL is temporarily contended.
+ * Expired callers wait for one shared refresh so the first visitor after a
+ * collection sees its new aggregate. The previous success is only a fallback
+ * when that refresh fails; its timestamp stays expired so the next read retries.
  */
 export function createNewsCalendarCache(
   repository: Pick<ContentReadRepository, "readNewsCalendar">,
@@ -189,10 +189,16 @@ export function createNewsCalendarCache(
 
   const refresh = (): Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>> => {
     if (refreshing) return refreshing;
-    const activeRefresh = repository.readNewsCalendar()
+    const activeRefresh = Promise.resolve()
+      .then(() => repository.readNewsCalendar())
       .then((value) => {
         cached = { value, loadedAt: now() };
         return value;
+      })
+      .catch((error: unknown) => {
+        if (!cached) throw error;
+        onError(error);
+        return cached.value;
       })
       .finally(() => {
         refreshing = null;
@@ -204,13 +210,6 @@ export function createNewsCalendarCache(
   return {
     async read() {
       if (cached && now() - cached.loadedAt < ttlMs) return cached.value;
-      if (cached) {
-        // The caller gets the last verified aggregate immediately. The error is
-        // still observable in server logs, but a transient refresh failure does
-        // not turn a previously good public calendar into a 503.
-        void refresh().catch(onError);
-        return cached.value;
-      }
       return refresh();
     },
   };
@@ -242,8 +241,8 @@ const DEFAULT_NEWS_RESPONSE_CACHE_MAX_ENTRIES = 128;
 
 /**
  * Caches successful, already-authorized news page reads by their complete URL.
- * An expired successful page remains available while one refresh runs, so a
- * short PostgreSQL stall cannot fan out into identical browser reads.
+ * Expired reads wait for a coalesced refresh. Only a failed refresh falls back
+ * to the last success, without extending its TTL or caching an error response.
  */
 export function createNewsResponseCache(
   repository: Pick<ContentReadRepository, "read">,
@@ -289,6 +288,11 @@ export function createNewsResponseCache(
         touch(key, entry);
         return value;
       })
+      .catch((error: unknown) => {
+        if (!entry.cached) throw error;
+        onError(error);
+        return entry.cached.value;
+      })
       .finally(() => {
         entry.refreshing = null;
         if (!entry.cached && entries.get(key) === entry) entries.delete(key);
@@ -309,10 +313,6 @@ export function createNewsResponseCache(
       }
       touch(key, entry);
       if (entry.cached && now() - entry.cached.loadedAt < ttlMs) {
-        return Promise.resolve(entry.cached.value);
-      }
-      if (entry.cached) {
-        void refresh(key, entry, request).catch(onError);
         return Promise.resolve(entry.cached.value);
       }
       return refresh(key, entry, request);

@@ -33,15 +33,17 @@ function articleLink(article, context = {}) {
   return `/news/?${params}`;
 }
 
-async function requestJson(url, lifetimeSignal, timeoutMs = 12000) {
+async function requestJson(url, lifetimeSignal) {
   const controller = new AbortController();
   let timedOut = false;
   const abort = () => controller.abort();
   if (lifetimeSignal.aborted) abort();
   else lifetimeSignal.addEventListener('abort', abort, {once: true});
-  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+  // An uncached read on the shared host can exceed 12 seconds; keep the
+  // request cancellable without turning a valid slow response into an error.
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
   try {
-    const response = await fetch(url, {signal: controller.signal, headers: {Accept: 'application/json'}});
+    const response = await fetch(url, {signal: controller.signal, cache: 'no-store', headers: {Accept: 'application/json'}});
     if (!response.ok) throw new Error(`资讯服务暂不可用（HTTP ${response.status}）`);
     return await response.json();
   } catch (error) {
@@ -242,6 +244,7 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
     } catch (error) {
       if (current !== generation || lifetime.signal.aborted) return;
       loading=false; renderList();
+      if (!rows.length) content.querySelector('.news-list').replaceChildren();
       content.querySelector('.news-tail').replaceChildren(status(error.message, () => {void loadList(append);}, true));
     }
   }
@@ -249,8 +252,7 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   async function loadCalendar() {
     calendarError='';
     try {
-      // The first historical aggregate is slower than a paged list on this host.
-      const payload = await requestJson(`${apiBase}/news/calendar`, lifetime.signal, 30000);
+      const payload = await requestJson(`${apiBase}/news/calendar`, lifetime.signal);
       if (lifetime.signal.aborted) return;
       if (!Array.isArray(payload.buckets) || !Array.isArray(payload.sourceCounts)) throw new Error('资讯日历暂不可用');
       calendar=payload; calendarLoaded=true;
