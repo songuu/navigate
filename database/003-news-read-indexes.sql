@@ -6,3 +6,15 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS news_items_public_list_order_idx
 
 CREATE INDEX CONCURRENTLY IF NOT EXISTS news_items_public_layer_list_order_idx
   ON public.news_items (ecosystem_layer, collected_date DESC, published_date DESC, external_id ASC);
+
+-- Interrupted concurrent builds can leave an invalid index with the same name.
+-- Refuse publication rather than silently trusting IF NOT EXISTS in that case.
+DO $$
+BEGIN
+  IF NOT (SELECT bool_and(indisvalid) FROM pg_index
+    WHERE indexrelid IN ('public.news_items_public_list_order_idx'::regclass,
+                        'public.news_items_public_layer_list_order_idx'::regclass)) THEN
+    RAISE EXCEPTION 'Navigate read indexes are invalid; rebuild before publication';
+  END IF;
+END $$;
+ANALYZE public.news_items;

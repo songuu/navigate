@@ -75,6 +75,7 @@ if [[ ! -f "$base/shared/news-migrated" ]]; then
   cmp "$backup/source-verify.txt" "$backup/target-verify.txt"
   echo 'Source/destination news row counts, date buckets and payload checksums match.'
 fi
+docker exec -i agent-build-postgres sh -c 'exec psql -U "$POSTGRES_USER" -d navigate -v ON_ERROR_STOP=1' < database/003-news-read-indexes.sql > "$backup/read-indexes.log"
 chown -R root:navigate "$base/shared"
 chmod 750 "$base/shared"
 chmod 640 "$base/shared/"*.env
