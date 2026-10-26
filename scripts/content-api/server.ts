@@ -86,18 +86,19 @@ function createContentApiServerContext(options: ContentApiServerOptions): { serv
   const allowedOrigins = new Set(options.allowedOrigins ?? DEFAULT_CONTENT_API_ALLOWED_ORIGINS);
   const allowMissingOrigin = options.allowMissingOrigin ?? false;
   const onError = options.onError ?? (() => undefined);
+  const newsResponseCache = createNewsResponseCache(options.repository, {
+    ttlMs: options.newsResponseCacheTtlMs,
+    maxEntries: options.newsResponseCacheMaxEntries,
+    now: options.now,
+    onError,
+  });
   const newsCalendarCache = createNewsCalendarCache(options.repository, {
     ttlMs: options.newsCalendarCacheTtlMs,
     refreshIntervalMs: options.newsCalendarRefreshIntervalMs,
     maxStaleMs: options.newsCalendarMaxStaleMs,
     publishSnapshot: options.newsCalendarSnapshotPublisher,
+    onChange: () => newsResponseCache.invalidate(),
     scheduleRefresh: options.newsCalendarScheduleRefresh,
-    now: options.now,
-    onError,
-  });
-  const newsResponseCache = createNewsResponseCache(options.repository, {
-    ttlMs: options.newsResponseCacheTtlMs,
-    maxEntries: options.newsResponseCacheMaxEntries,
     now: options.now,
     onError,
   });
@@ -193,6 +194,8 @@ export interface NewsCalendarCacheOptions {
   readonly refreshIntervalMs?: number;
   readonly maxStaleMs?: number;
   readonly publishSnapshot?: CalendarSnapshotPublisher;
+  /** Runs synchronously before a changed generation is published. */
+  readonly onChange?: () => void;
   /** Returns a cleanup function; the default interval is unreferenced. */
   readonly scheduleRefresh?: (callback: () => void, intervalMs: number) => () => void;
   readonly now?: () => number;
@@ -253,6 +256,9 @@ export function createNewsCalendarCache(
         // together only after encoding succeeds, retaining the last good body
         // if either the database read or serialization fails.
         const snapshot = { value, bytes: Buffer.from(`${JSON.stringify(value)}\n`, "utf8"), loadedAt: now() };
+        // Once a changed aggregate is visible, its corresponding list must not
+        // remain behind a previously cached response for another full TTL.
+        if (!cached || !snapshot.bytes.equals(cached.bytes)) options.onChange?.();
         // Publication is part of a successful generation, not a repackaging of
         // the previous value. Failures retain the old file and success age.
         await options.publishSnapshot?.({
@@ -365,7 +371,10 @@ const DEFAULT_NEWS_RESPONSE_CACHE_MAX_ENTRIES = 128;
 export function createNewsResponseCache(
   repository: Pick<ContentReadRepository, "read">,
   options: NewsResponseCacheOptions = {},
-): { read(key: string, request: ContentReadRequest): Promise<Awaited<ReturnType<ContentReadRepository["read"]>>> } {
+): {
+  read(key: string, request: ContentReadRequest): Promise<Awaited<ReturnType<ContentReadRepository["read"]>>>;
+  invalidate(): void;
+} {
   const ttlMs = normalizeCalendarCacheTtl(options.ttlMs);
   const maxEntries = normalizeNewsResponseCacheMaxEntries(options.maxEntries);
   const now = options.now ?? Date.now;
@@ -420,6 +429,11 @@ export function createNewsResponseCache(
   };
 
   return {
+    invalidate() {
+      // Detached in-flight entries may finish for their original callers, but
+      // touch() checks identity and cannot put them back into the current map.
+      entries.clear();
+    },
     read(key, request) {
       let entry = entries.get(key);
       if (!entry) {

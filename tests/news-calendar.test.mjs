@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readNewsCalendar, validateNewsCalendarSnapshot } from '../src/news-calendar.js';
+import { readNewsCalendar, validateNewsCalendarSnapshot, newsCalendarChanged, newsListCount, newsAutoDate, refreshNewsListPrefix, startNewsCalendarRefresh } from '../src/news-calendar.js';
 
 const responseDate = 'Mon, 26 Oct 2026 01:00:00 GMT';
 const shape = () => ({
@@ -124,4 +124,81 @@ test('read failures and aborts retain their explicit error and do not trigger fa
     await assert.rejects(readNewsCalendar({isDevelopment:true,hostname:'localhost',readJson:async()=>{calls++;throw failure;}}),error=>error===failure);
     assert.equal(calls,1);
   }
+});
+
+test('unchanged calendars ignore bucket ordering and unrelated layers do not refresh the selected list', async () => {
+  const previous=shape();
+  const next={buckets:[{date:'2026-10-25',ecosystemLayer:'foundation',articleCount:5},...previous.buckets],sourceCounts:[...previous.sourceCounts].reverse()};
+  assert.equal(newsCalendarChanged(previous,{buckets:[...previous.buckets],sourceCounts:[...previous.sourceCounts].reverse()}),false);
+  assert.equal(newsCalendarChanged(previous,next),true);
+  assert.equal(newsListCount(next,{date:'2026-10-26',layer:'runtime'}),2);
+  assert.equal(newsListCount(next,{date:null,layer:'all'}),7);
+  let calls=0;
+  assert.equal(await refreshNewsListPrefix({previousCount:2,nextCount:2,loadedCount:20,readPage:async()=>{calls++;}}),null);
+  assert.equal(calls,0);
+});
+
+test('only the untouched latest view at the top follows a newly available date', () => {
+  const calendar={buckets:[...shape().buckets,{date:'2026-10-27',ecosystemLayer:'runtime',articleCount:1}],sourceCounts:shape().sourceCounts};
+  const state={date:'2026-10-26',layer:'all',explicitDate:false,explicitLayer:false,id:null};
+  assert.equal(newsAutoDate(calendar,{...state,atTop:true,query:''}),'2026-10-27');
+  for(const overrides of [{explicitDate:true},{explicitLayer:true},{id:'reading'},{atTop:false},{query:'model'},{date:null,explicitDate:true}]) {
+    const context={...state,atTop:true,query:'',...overrides};
+    assert.equal(newsAutoDate(calendar,context),context.date);
+  }
+  assert.equal(newsAutoDate(shape(),{...state,atTop:true,query:''}),'2026-10-26');
+});
+
+test('new insertions rebase the full loaded prefix and keep paging past all retained articles', async () => {
+  const calls=[],items=Array.from({length:1500},(_,index)=>({id:`article-${index}`}));
+  const result=await refreshNewsListPrefix({date:'2026-10-26',layer:'runtime',previousCount:1498,nextCount:1500,loadedCount:1200,readPage:async options=>{
+    calls.push(options);return {items:items.slice(options.offset,options.offset+options.limit),hasMore:options.offset+options.limit<items.length};
+  }});
+  assert.equal(result.items.length,1202);
+  assert.equal(result.offset,1202);
+  assert.equal(result.hasMore,true);
+  assert.deepEqual(calls,[{date:'2026-10-26',layer:'runtime',offset:0,limit:1000},{date:'2026-10-26',layer:'runtime',offset:1000,limit:202}]);
+});
+
+test('background list refresh handles removals and aborts without replacing the caller snapshot', async () => {
+  const old=[{id:'old'}],before=JSON.stringify(old);
+  const result=await refreshNewsListPrefix({previousCount:22,nextCount:1,loadedCount:40,readPage:async()=>({items:[{id:'current'}],hasMore:false})});
+  assert.deepEqual(result,{items:[{id:'current'}],offset:1,hasMore:false});
+  assert.equal(JSON.stringify(old),before);
+  let current=true,calls=0;
+  const canceled=await refreshNewsListPrefix({previousCount:40,nextCount:41,loadedCount:40,isCurrent:()=>current,readPage:async()=>{calls++;current=false;return {items:[{id:'new'}],hasMore:true};}});
+  assert.equal(canceled,null);
+  assert.equal(calls,1);
+  await assert.rejects(refreshNewsListPrefix({previousCount:1,nextCount:2,loadedCount:20,readPage:async()=>({items:[],hasMore:true})}),/分页/);
+});
+
+function refreshHarness(refresh) {
+  let visible=true,timer=null,visibilityListener=null,cleared=0;
+  const controller=new AbortController();
+  const visibility={get visibilityState(){return visible?'visible':'hidden';},addEventListener(type,listener){assert.equal(type,'visibilitychange');visibilityListener=listener;},removeEventListener(type,listener){assert.equal(listener,visibilityListener);visibilityListener=null;}};
+  const dispose=startNewsCalendarRefresh({refresh,visibility,signal:controller.signal,setIntervalImpl:(callback,delay)=>{assert.equal(delay,30000);timer=callback;return 7;},clearIntervalImpl:id=>{assert.equal(id,7);timer=null;cleared++;}});
+  return {dispose,controller,tick:()=>timer?.(),setVisible:value=>{visible=value;visibilityListener?.();},get hasTimer(){return Boolean(timer);},get hasListener(){return Boolean(visibilityListener);},get cleared(){return cleared;}};
+}
+const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('visible polling checks immediately and every thirty seconds, pauses hidden and resumes immediately', async () => {
+  let calls=0;
+  const harness=refreshHarness(async()=>{calls++;});
+  await settle();assert.equal(calls,1);
+  harness.tick();await settle();assert.equal(calls,2);
+  harness.setVisible(false);assert.equal(harness.hasTimer,false);
+  harness.tick();await settle();assert.equal(calls,2);
+  harness.setVisible(true);await settle();assert.equal(calls,3);assert.equal(harness.hasTimer,true);
+  harness.dispose();assert.equal(harness.hasTimer,false);assert.equal(harness.hasListener,false);
+  harness.tick();await settle();assert.equal(calls,3);
+});
+
+test('polling never overlaps requests and survives a network error until disposal aborts scheduling', async () => {
+  let calls=0,release;
+  const harness=refreshHarness(async()=>{calls++;if(calls===1)await new Promise(resolve=>{release=resolve;});else throw new Error('offline');});
+  harness.tick();harness.tick();await settle();assert.equal(calls,1);
+  release();await settle();harness.tick();await settle();assert.equal(calls,2);
+  harness.tick();await settle();assert.equal(calls,3);
+  harness.controller.abort();assert.equal(harness.hasTimer,false);assert.equal(harness.hasListener,false);
+  harness.tick();await settle();assert.equal(calls,3);
 });

@@ -1,6 +1,6 @@
 import './news.css';
 import { NEWS_LAYERS, buildNewsQuery, isNewsDate, normalizeArticle, calendarDates, articleParagraphs, filterLoadedNews, findNewsNeighbors, calendarSelectionForLayer } from './news-format.js';
-import { readNewsCalendar } from './news-calendar.js';
+import { readNewsCalendar, newsCalendarChanged, newsListCount, newsAutoDate, refreshNewsListPrefix, startNewsCalendarRefresh } from './news-calendar.js';
 
 const mounted = new WeakMap();
 const PAGE_SIZE = 20;
@@ -23,7 +23,13 @@ function contextFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const layer = params.get('layer');
   const date = params.get('date');
-  return {id: params.get('id'), layer: NEWS_LAYERS.some(([key]) => key === layer) ? layer : 'all', date: isNewsDate(date) ? date : null, explicitDate: params.has('date')};
+  const navigation = window.history.state;
+  const ownedIntent = navigation?.news === true;
+  return {
+    id: params.get('id'), layer: NEWS_LAYERS.some(([key]) => key === layer) ? layer : 'all', date: isNewsDate(date) ? date : null,
+    explicitDate: ownedIntent && typeof navigation.explicitDate === 'boolean' ? navigation.explicitDate : params.has('date'),
+    explicitLayer: ownedIntent && typeof navigation.explicitLayer === 'boolean' ? navigation.explicitLayer : params.has('layer'),
+  };
 }
 
 function articleLink(article, context = {}) {
@@ -85,6 +91,7 @@ function metadata(article) {
 
 function newsRow(article, context, openArticle) {
   const row = el('article', 'news-row');
+  row.dataset.articleId = article.id;
   const copy = el('div', 'news-row-copy');
   copy.append(metadata(article));
   const title = el('a', 'news-row-title', article.title);
@@ -105,6 +112,10 @@ function newsRow(article, context, openArticle) {
   return row;
 }
 
+function newsViewVisible(container) {
+  return document.visibilityState === 'visible' && container.isConnected && container.getClientRects().length > 0;
+}
+
 /** Owns all requests and listeners; call the returned disposer before replacing the view. */
 export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   mounted.get(container)?.();
@@ -117,8 +128,14 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   let loading = false;
   let calendar = {buckets: [], sourceCounts: []};
   let calendarLoaded = false;
+  let calendarFresh = false;
   let calendarError = '';
   let calendarGeneration = 0;
+  let calendarRequest = null;
+  let listCount = null;
+  let refreshingList = false;
+  let listRefreshError = '';
+  let renderListItems = null;
   let month = (state.date || new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())).slice(0, 7);
   let query = '';
   let listScroll = 0;
@@ -139,7 +156,7 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
     else if (state.explicitDate) params.set('date', 'all');
     if (state.layer !== 'all') params.set('layer', state.layer);
     const url = `${window.location.pathname}${params.size ? `?${params}` : ''}`;
-    window.history[push ? 'pushState' : 'replaceState']({news: true}, '', url);
+    window.history[push ? 'pushState' : 'replaceState']({news:true,explicitDate:state.explicitDate,explicitLayer:state.explicitLayer}, '', url);
   }
 
   function renderSidebar() {
@@ -151,7 +168,7 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
     for (const [key, label] of [['all', '全部资讯'], ...NEWS_LAYERS]) {
       const count = calendar.buckets.filter(bucket => key === 'all' || bucket.ecosystemLayer === key).reduce((sum, bucket) => sum + bucket.articleCount, 0);
       const item = button(label, () => {
-        state.layer = key; state.id = null;
+        state.layer = key; state.explicitLayer = true; state.id = null;
         const dates = calendarDates(calendar.buckets, key);
         const selection = calendarSelectionForLayer(state.date, month, dates, calendarLoaded);
         state.date = selection.date; month = selection.month;
@@ -232,13 +249,16 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
       if (loading) tail.append(status('正在加载资讯…'));
       else if (hasMore) tail.append(button('加载更多资讯 ↓', () => {void loadList(true);}, 'news-load-more'));
       else if (rows.length) tail.append(el('p', 'news-muted', '已显示当前筛选下的全部资讯'));
+      renderListRefreshStatus();
     }
+    renderListItems = renderItems;
     renderItems();
   }
 
   async function loadList(append = false) {
     const current = ++generation;
-    if (!append) {rows=[]; offset=0; hasMore=false;}
+    if (!append) {rows=[]; offset=0; hasMore=false;listCount=calendarFresh?newsListCount(calendar,state):null;}
+    listRefreshError='';
     loading=true; renderList();
     try {
       const page = await requestPage(apiBase, {date:state.date,layer:state.layer,offset,limit:PAGE_SIZE}, lifetime.signal);
@@ -246,6 +266,7 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
       rows = [...new Map([...rows,...page.items].map(row => [row.id,row])).values()];
       offset += page.items.length; hasMore=Boolean(page.hasMore); loading=false;
       renderList();
+      void refreshList();
     } catch (error) {
       if (current !== generation || lifetime.signal.aborted) return;
       loading=false; renderList();
@@ -254,28 +275,80 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
     }
   }
 
-  async function loadCalendar() {
-    const current = ++calendarGeneration;
-    calendarError='';
-    try {
-      const payload = await readNewsCalendar({readJson:requestJson,apiBase,signal:lifetime.signal,isDevelopment:import.meta.env?.DEV === true,hostname:window.location.hostname});
-      if (current !== calendarGeneration || lifetime.signal.aborted) return;
-      calendar=payload; calendarLoaded=true;
-      const dates=calendarDates(calendar.buckets,state.layer);
-      if (!state.explicitDate && !state.id && !state.date && dates[0]) {
-        state.date=dates[0]; month=state.date.slice(0,7); replaceUrl(); void loadList();
-      }
-    } catch (error) {
-      if (current !== calendarGeneration || lifetime.signal.aborted) return;
-      calendar={buckets:[],sourceCounts:[]}; calendarLoaded=false;
-      calendarError=error.message;
+  function listPosition() {
+    const scrollY=window.scrollY;
+    const anchor=scrollY>32 ? [...content.querySelectorAll('.news-row')].find(row=>row.getBoundingClientRect().bottom>0) : null;
+    return {scrollY,id:anchor?.dataset.articleId,top:anchor?.getBoundingClientRect().top};
+  }
+
+  function renderListRefreshStatus() {
+    const tail=content.querySelector('.news-tail');
+    if (!tail) return;
+    tail.querySelector('.news-refresh-error')?.remove();
+    if (listRefreshError) {
+      const box=status(listRefreshError,()=>{void refreshList();},true);
+      box.classList.add('news-refresh-error');tail.append(box);
     }
-    renderSidebar();
+  }
+
+  function restoreListPosition(position) {
+    const anchor=position.id ? [...content.querySelectorAll('.news-row')].find(row=>row.dataset.articleId===position.id) : null;
+    const shift=anchor ? anchor.getBoundingClientRect().top-position.top : 0;
+    window.scrollTo({top:position.scrollY+shift,behavior:'instant'});
+  }
+
+  async function refreshList() {
+    if (state.id || loading || refreshingList || !calendarFresh || lifetime.signal.aborted || !newsViewVisible(container)) return;
+    const nextCount=newsListCount(calendar,state);
+    if (nextCount === listCount) return;
+    const current=generation;
+    const isCurrent=()=>current===generation && !state.id && !loading && !lifetime.signal.aborted && newsViewVisible(container);
+    refreshingList=true;
+    try {
+      const result=await refreshNewsListPrefix({readPage:options=>requestPage(apiBase,options,lifetime.signal),date:state.date,layer:state.layer,previousCount:listCount,nextCount,loadedCount:offset,isCurrent});
+      if (!result || !isCurrent()) return;
+      const position=listPosition();
+      rows=result.items;offset=result.offset;hasMore=result.hasMore;listCount=nextCount;listRefreshError='';
+      renderListItems?.();restoreListPosition(position);
+    } catch (error) {
+      if (!isCurrent()) return;
+      listRefreshError=`自动更新暂不可用：${error.message}。已保留当前资讯。`;
+      renderListRefreshStatus();
+    } finally { refreshingList=false; }
+  }
+
+  async function loadCalendar() {
+    if (lifetime.signal.aborted || !newsViewVisible(container)) return;
+    if (calendarRequest) return calendarRequest;
+    const current = ++calendarGeneration;
+    calendarRequest=(async()=>{
+      try {
+        const payload = await readNewsCalendar({readJson:requestJson,apiBase,signal:lifetime.signal,isDevelopment:import.meta.env?.DEV === true,hostname:window.location.hostname});
+        if (current !== calendarGeneration || lifetime.signal.aborted || !newsViewVisible(container)) return;
+        const changed=!calendarLoaded || newsCalendarChanged(calendar,payload);
+        const hadError=Boolean(calendarError);
+        calendar=payload;calendarLoaded=true;calendarFresh=true;calendarError='';
+        const nextDate=newsAutoDate(calendar,{...state,atTop:window.scrollY<=32,query});
+        const dateChanged=nextDate !== state.date;
+        if (dateChanged) {
+          state.date=nextDate;month=state.date.slice(0,7);replaceUrl();void loadList();
+        } else void refreshList();
+        if (changed || hadError || dateChanged) renderSidebar();
+      } catch (error) {
+        if (current !== calendarGeneration || lifetime.signal.aborted || !newsViewVisible(container)) return;
+        calendarFresh=false;
+        const message=calendarLoaded ? `自动更新暂不可用：${error.message}。当前显示上次成功读取的日历。` : error.message;
+        if (calendarError !== message) {calendarError=message;renderSidebar();}
+      } finally {
+        calendarRequest=null;
+      }
+    })();
+    return calendarRequest;
   }
 
   function openArticle(article) {
     listScroll=window.scrollY;
-    listState={rows:[...rows],offset,hasMore,date:state.date,layer:state.layer};
+    listState={rows:[...rows],offset,hasMore,listCount,date:state.date,layer:state.layer};
     state.id=article.id;
     replaceUrl(article.id,true);
     void loadDetail(); window.scrollTo({top:0,behavior:'instant'});
@@ -284,8 +357,9 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   function backToList() {
     state.id=null; replaceUrl(null,true);
     if (listState && listState.date===state.date && listState.layer===state.layer) {
-      generation++; rows=listState.rows; offset=listState.offset; hasMore=listState.hasMore; loading=false; renderList();
+      generation++; rows=[...listState.rows]; offset=listState.offset; hasMore=listState.hasMore;listCount=listState.listCount; loading=false; renderList();
       window.scrollTo({top:listScroll,behavior:'instant'});
+      void refreshList();
     } else void loadList();
   }
 
@@ -361,18 +435,17 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
     state=contextFromUrl(); if(state.date) month=state.date.slice(0,7); renderSidebar();
     if(state.id) {void loadDetail(); return;}
     if(listState && listState.date===state.date && listState.layer===state.layer) {
-      generation++; rows=listState.rows; offset=listState.offset; hasMore=listState.hasMore; loading=false; renderList();
+      generation++; rows=[...listState.rows]; offset=listState.offset; hasMore=listState.hasMore;listCount=listState.listCount; loading=false; renderList();
       window.scrollTo({top:listScroll,behavior:'instant'});
+      void refreshList();
     } else void loadList();
   };
-  const onVisibilityChange=()=> {if(document.visibilityState === 'visible') void loadCalendar();};
   window.addEventListener('popstate',onPopState);
-  document.addEventListener('visibilitychange',onVisibilityChange);
-  const dispose=()=> {lifetime.abort();generation++;calendarGeneration++;window.removeEventListener('popstate',onPopState);document.removeEventListener('visibilitychange',onVisibilityChange);mounted.delete(container);};
+  const dispose=()=> {lifetime.abort();generation++;calendarGeneration++;window.removeEventListener('popstate',onPopState);mounted.delete(container);};
   mounted.set(container,dispose);
   renderSidebar();
   if(state.id)void loadDetail();else void loadList();
-  void loadCalendar();
+  startNewsCalendarRefresh({refresh:loadCalendar,visibility:document,signal:lifetime.signal,isActive:()=>newsViewVisible(container)});
   return dispose;
 }
 
@@ -382,16 +455,51 @@ export async function mountNewsPreview(container,{apiBase='/api/content/v1'}={})
   const dispose=()=> {lifetime.abort();mounted.delete(container);};
   mounted.set(container,dispose);
   container.classList.add('news-preview');
-  async function load() {
-    container.replaceChildren(status('正在读取最新 AI 资讯…'));
+  let loading=false;
+  let ready=false;
+  let previewCount=null;
+  let latestCount=null;
+  let errorBox=null;
+  const clearError=()=>{errorBox?.remove();errorBox=null;};
+  function showError(message) {
+    clearError();errorBox=status(message,()=>{void refresh();},true);container.append(errorBox);
+  }
+  async function load(targetCount=latestCount) {
+    if(loading || lifetime.signal.aborted || !newsViewVisible(container))return;
+    loading=true;
+    let succeeded=false;
+    if(!ready)container.replaceChildren(status('正在读取最新 AI 资讯…'));
     try {
       const page=await requestPage(apiBase,{layer:'model-platform',limit:3},lifetime.signal);
-      if(lifetime.signal.aborted)return;
+      if(lifetime.signal.aborted || !newsViewVisible(container))return;
+      clearError();
       container.replaceChildren();
       page.items.forEach(article=>container.append(newsRow(article,{})));
       if(!page.items.length)container.append(status('资讯正在准备中，稍后再来看看。'));
-    }catch(error){if(!lifetime.signal.aborted)container.replaceChildren(status(error.message,()=>{void load();},true));}
+      ready=true;previewCount=targetCount;succeeded=true;
+    }catch(error){
+      if(lifetime.signal.aborted || !newsViewVisible(container))return;
+      if(ready)showError(`自动更新暂不可用：${error.message}。已保留当前资讯。`);
+      else container.replaceChildren(status(error.message,()=>{void load();},true));
+    }finally{loading=false;}
+    // A calendar that arrived after this request began cannot certify its
+    // result. Reconcile once using the now-known count, then remain idle.
+    if(succeeded && previewCount===null && latestCount!==null)void load(latestCount);
+  }
+  async function refresh() {
+    if(lifetime.signal.aborted || !newsViewVisible(container))return;
+    try {
+      const calendar=await readNewsCalendar({readJson:requestJson,apiBase,signal:lifetime.signal,isDevelopment:import.meta.env?.DEV === true,hostname:window.location.hostname});
+      if(lifetime.signal.aborted || !newsViewVisible(container))return;
+      latestCount=newsListCount(calendar,{layer:'model-platform'});
+      if(!ready || previewCount !== latestCount)await load(latestCount);
+      else clearError();
+    }catch(error){
+      if(lifetime.signal.aborted || !newsViewVisible(container))return;
+      if(ready)showError(`自动更新暂不可用：${error.message}。已保留当前资讯。`);
+    }
   }
   void load();
+  startNewsCalendarRefresh({refresh,visibility:document,signal:lifetime.signal,isActive:()=>newsViewVisible(container)});
   return dispose;
 }

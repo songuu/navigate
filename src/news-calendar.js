@@ -1,4 +1,4 @@
-import { NEWS_LAYERS, isNewsDate } from './news-format.js';
+import { NEWS_LAYERS, isNewsDate, calendarDates } from './news-format.js';
 
 const layerKeys = new Set(NEWS_LAYERS.map(([key]) => key));
 const MAX_SNAPSHOT_LIFETIME_MS = 120000;
@@ -60,4 +60,77 @@ export async function readNewsCalendar({readJson, apiBase = '/api/content/v1', s
     throw new Error(`资讯服务暂不可用（HTTP ${response.status}）`);
   }
   return validateNewsCalendarSnapshot(response.payload, response);
+}
+
+export function newsCalendarChanged(previous, next) {
+  const signature = calendar => JSON.stringify([
+    calendar.buckets.map(row => [row.date, row.ecosystemLayer, row.articleCount]).sort(),
+    calendar.sourceCounts.map(row => [row.ecosystemLayer, row.sourceCount]).sort(),
+  ]);
+  return signature(previous) !== signature(next);
+}
+
+export function newsListCount(calendar, {date = null, layer = 'all'} = {}) {
+  return calendar.buckets.reduce((count, bucket) => count + ((!date || bucket.date === date)
+    && (layer === 'all' || bucket.ecosystemLayer === layer) ? bucket.articleCount : 0), 0);
+}
+
+export function newsAutoDate(calendar, {date, layer = 'all', explicitDate, explicitLayer, id, atTop, query = ''}) {
+  if (explicitDate || explicitLayer || id || !atTop || query.trim()) return date;
+  const latest = calendarDates(calendar.buckets, layer)[0];
+  return latest && (!date || latest > date) ? latest : date;
+}
+
+/** Re-read the loaded prefix plus inserts so the next page cannot skip displaced rows. */
+export async function refreshNewsListPrefix({readPage, previousCount, nextCount, loadedCount, date = null, layer = 'all', isCurrent = () => true}) {
+  if (previousCount === nextCount || !isCurrent()) return null;
+  const inserts = previousCount === null ? 0 : Math.max(0, nextCount - previousCount);
+  const target = Math.max(20, loadedCount + inserts);
+  const items = [];
+  let offset = 0;
+  let hasMore = true;
+  while (hasMore && offset < target) {
+    if (!isCurrent()) return null;
+    if (offset > 100000) throw new Error('资讯刷新超出分页范围，请缩小日期筛选');
+    const page = await readPage({date, layer, offset, limit: Math.min(1000, target - offset)});
+    if (!isCurrent()) return null;
+    if (!page.items.length && page.hasMore) throw new Error('资讯分页未返回数据，无法刷新当前列表');
+    items.push(...page.items);
+    offset += page.items.length;
+    hasMore = Boolean(page.hasMore);
+  }
+  return {items: [...new Map(items.map(item => [item.id, item])).values()], offset, hasMore};
+}
+
+/** Keep calendar checks independent of list/detail requests and stop work while hidden. */
+export function startNewsCalendarRefresh({refresh, visibility, signal, isActive = () => true, setIntervalImpl = setInterval, clearIntervalImpl = clearInterval}) {
+  let timer = null;
+  let running = false;
+  let disposed = false;
+  const run = async () => {
+    if (disposed || signal.aborted || running || visibility.visibilityState !== 'visible' || !isActive()) return;
+    running = true;
+    try { await refresh(); }
+    catch { /* The refresh owner reports errors; a later tick must still recover. */ }
+    finally { running = false; }
+  };
+  const clearTimer = () => { if (timer !== null) {clearIntervalImpl(timer); timer = null;} };
+  const onVisibility = () => {
+    if (disposed || signal.aborted) return;
+    if (visibility.visibilityState !== 'visible') {clearTimer(); return;}
+    if (timer === null) timer = setIntervalImpl(() => {void run();}, 30000);
+    void run();
+  };
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true; clearTimer();
+    visibility.removeEventListener('visibilitychange', onVisibility);
+    signal.removeEventListener('abort', dispose);
+  };
+  if (!signal.aborted) {
+    visibility.addEventListener('visibilitychange', onVisibility);
+    signal.addEventListener('abort', dispose, {once: true});
+    onVisibility();
+  }
+  return dispose;
 }

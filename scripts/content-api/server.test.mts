@@ -271,6 +271,89 @@ function manualCalendarRefresh() {
 
 const flushRefresh = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test("invalidating news responses expires every key before its normal sixty-second TTL", async () => {
+  let generation = 1;
+  let calls = 0;
+  const cache = createNewsResponseCache({ async read() {
+    calls++;
+    return { items: [{ external_id: String(generation) }], totalCount: generation, hasMore: false };
+  } }, { now: () => 0 });
+  const secondKey = `${newsResponseCacheKey}&offset=10`;
+  await cache.read(newsResponseCacheKey, newsResponseRequest);
+  await cache.read(secondKey, { ...newsResponseRequest, offset: 10 });
+  assert.equal(calls, 2);
+  generation = 2;
+  cache.invalidate();
+  assert.equal((await cache.read(newsResponseCacheKey, newsResponseRequest)).items[0]?.external_id, "2");
+  assert.equal((await cache.read(secondKey, { ...newsResponseRequest, offset: 10 })).items[0]?.external_id, "2");
+  assert.equal(calls, 4);
+});
+
+test("an invalidated in-flight news read cannot repopulate or replace the current entry", async () => {
+  let calls = 0;
+  let releaseOld: ((value: ContentPage) => void) | undefined;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolveStarted) => { markStarted = resolveStarted; });
+  const old = new Promise<ContentPage>((resolveOld) => { releaseOld = resolveOld; });
+  const oldPage = { items: [{ external_id: "old" }], totalCount: 1, hasMore: false };
+  const newPage = { items: [{ external_id: "new" }], totalCount: 2, hasMore: false };
+  const cache = createNewsResponseCache({ async read() {
+    calls++;
+    if (calls === 1) { markStarted?.(); return old; }
+    return newPage;
+  } });
+  const oldRead = cache.read(newsResponseCacheKey, newsResponseRequest);
+  await started;
+  cache.invalidate();
+  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), newPage);
+  releaseOld?.(oldPage);
+  assert.deepEqual(await oldRead, oldPage);
+  assert.deepEqual(await cache.read(newsResponseCacheKey, newsResponseRequest), newPage);
+  assert.equal(calls, 2);
+});
+
+test("changed calendar statistics invalidate list entries before their new asset is published", async () => {
+  let now = 0;
+  let count = 1;
+  let reads = 0;
+  let releasePublication: (() => void) | undefined;
+  let markPublishing: (() => void) | undefined;
+  const publishing = new Promise<void>((resolvePublishing) => { markPublishing = resolvePublishing; });
+  const pendingPublication = new Promise<void>((resolvePublication) => { releasePublication = resolvePublication; });
+  const timer = manualCalendarRefresh();
+  const server = await startContentApiServer({
+    repository: {
+      async read() { reads++; return { items: [{ external_id: String(count) }], totalCount: count, hasMore: false }; },
+      async readNewsCalendar() { return { buckets: [{ date: "2026-10-26", ecosystemLayer: "runtime", articleCount: count }], sourceCounts: [] }; },
+    },
+    host: "127.0.0.1", port: 0, allowedHosts, allowedOrigins, now: () => now,
+    newsCalendarRefreshIntervalMs: 30_000, newsCalendarScheduleRefresh: timer.schedule,
+    async newsCalendarSnapshotPublisher() {
+      if (count === 2) { markPublishing?.(); await pendingPublication; }
+    },
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const path = "/api/content/v1/news?fields=external_id&count=none";
+  try {
+    const initial = await request(address.port, path);
+    assert.deepEqual(initial.json.items, [{ external_id: "1" }]);
+    assert.equal(reads, 1);
+    now = 30_000;
+    timer.tick(); await flushRefresh();
+    await request(address.port, path);
+    assert.equal(reads, 1, "unchanged statistics must not clear the list just because asset metadata advances");
+    count = 2;
+    now = 31_000;
+    timer.tick();
+    await publishing;
+    const changed = await request(address.port, path);
+    assert.deepEqual(changed.json.items, [{ external_id: "2" }]);
+    assert.equal(reads, 2, "the old list entry must already be invalid before publication completes");
+    releasePublication?.(); await flushRefresh();
+  } finally { releasePublication?.(); await close(server); }
+});
+
 test("proactive calendar primes once then serves memory while background refreshes are single flight", async () => {
   let now = 0;
   let calls = 0;
