@@ -144,8 +144,7 @@ function createContentApiServerContext(options: ContentApiServerOptions): { serv
         if ([...requestUrl.searchParams.keys()].length > 0) {
           throw new ContentRequestError("unknown_parameter", "News calendar does not accept query parameters.");
         }
-        const calendar = await newsCalendarCache.read();
-        sendJson(res, 200, calendar, "no-cache");
+        await newsCalendarCache.writeResponse(res);
         return;
       }
       const assetRequest = parseContentAssetRequest(requestUrl);
@@ -196,6 +195,7 @@ export interface NewsCalendarCacheOptions {
 
 interface CachedNewsCalendar {
   readonly value: Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>;
+  readonly bytes: Buffer;
   readonly loadedAt: number;
 }
 
@@ -205,6 +205,7 @@ const DEFAULT_CALENDAR_MAX_STALE_MS = 120_000;
 
 interface NewsCalendarCache {
   read(): Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>>;
+  writeResponse(res: http.ServerResponse): Promise<void>;
   prime(): Promise<void>;
   isReady(): boolean;
   close(): void;
@@ -230,20 +231,24 @@ export function createNewsCalendarCache(
   const onError = options.onError ?? (() => undefined);
   const scheduleRefresh = options.scheduleRefresh ?? scheduleCalendarRefresh;
   let cached: CachedNewsCalendar | null = null;
-  let refreshing: Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>> | null = null;
+  let refreshing: Promise<CachedNewsCalendar> | null = null;
   let stopRefresh: (() => void) | null = null;
   let closed = false;
 
   const isReady = (): boolean => refreshIntervalMs === undefined
     || (!closed && cached !== null && now() - cached.loadedAt < maxStaleMs);
 
-  const refresh = (): Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>> => {
+  const refresh = (): Promise<CachedNewsCalendar> => {
     if (refreshing) return refreshing;
     const activeRefresh = Promise.resolve()
       .then(() => repository.readNewsCalendar())
       .then((value) => {
-        if (!closed) cached = { value, loadedAt: now() };
-        return value;
+        // Encode off the foreground path. Publish value, bytes and timestamp
+        // together only after encoding succeeds, retaining the last good body
+        // if either the database read or serialization fails.
+        const snapshot = { value, bytes: Buffer.from(`${JSON.stringify(value)}\n`, "utf8"), loadedAt: now() };
+        if (!closed) cached = snapshot;
+        return snapshot;
       })
       .catch((error: unknown) => {
         if (refreshIntervalMs !== undefined) {
@@ -252,7 +257,7 @@ export function createNewsCalendarCache(
         }
         if (!cached) throw error;
         onError(error);
-        return cached.value;
+        return cached;
       })
       .finally(() => {
         refreshing = null;
@@ -261,15 +266,30 @@ export function createNewsCalendarCache(
     return activeRefresh;
   };
 
+  const readSnapshot = async (): Promise<CachedNewsCalendar> => {
+    if (closed) throw new Error("Calendar cache is closed.");
+    if (refreshIntervalMs !== undefined) {
+      if (!isReady() || !cached) throw new Error("Calendar snapshot is unavailable or too old.");
+      return cached;
+    }
+    if (cached && now() - cached.loadedAt < ttlMs) return cached;
+    return refresh();
+  };
+
   return {
     async read() {
-      if (closed) throw new Error("Calendar cache is closed.");
-      if (refreshIntervalMs !== undefined) {
-        if (!isReady() || !cached) throw new Error("Calendar snapshot is unavailable or too old.");
-        return cached.value;
-      }
-      if (cached && now() - cached.loadedAt < ttlMs) return cached.value;
-      return refresh();
+      return (await readSnapshot()).value;
+    },
+    async writeResponse(res) {
+      const snapshot = await readSnapshot();
+      // Keep mutable buffers private; HTTP callers can send a snapshot but
+      // cannot alter the bytes retained for other visitors.
+      if (res.headersSent) return;
+      res.statusCode = 200;
+      res.setHeader("Content-Type", "application/json; charset=utf-8");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "no-cache");
+      res.end(snapshot.bytes);
     },
     async prime() {
       if (closed) throw new Error("Calendar cache is closed.");

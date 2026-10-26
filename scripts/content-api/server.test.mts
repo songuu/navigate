@@ -410,6 +410,98 @@ test("active health and calendar fail promptly on an aged snapshot then recover 
   assert.equal(timer.size, 0);
 });
 
+test("active calendar encodes each successful snapshot once and reuses it for concurrent HTTP reads", async () => {
+  let now = 0;
+  let generation = 1;
+  let encodings = 0;
+  let failed = false;
+  const timer = manualCalendarRefresh();
+  const errors: unknown[] = [];
+  const body = (count: number) => ({
+    buckets: [{ date: "2026-10-26", ecosystemLayer: "runtime", articleCount: count }],
+    sourceCounts: [{ ecosystemLayer: "all", sourceCount: 1 }],
+  });
+  const server = await startContentApiServer({
+    repository: {
+      ...successfulRepository,
+      async readNewsCalendar() {
+        if (failed) throw new Error("calendar refresh offline");
+        const value = body(generation);
+        return { ...value, toJSON() { encodings++; return value; } };
+      },
+    },
+    host: "127.0.0.1", port: 0, allowedHosts, allowedOrigins, now: () => now,
+    newsCalendarRefreshIntervalMs: 30_000, newsCalendarMaxStaleMs: 120_000,
+    newsCalendarScheduleRefresh: timer.schedule, onError: (error) => errors.push(error),
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    assert.equal(encodings, 1, "prime must encode before the first foreground request");
+    const initialReads = await Promise.all(Array.from({ length: 5 }, () => request(address.port, "/api/content/v1/news/calendar")));
+    for (const result of initialReads) {
+      assert.equal(result.status, 200);
+      assert.deepEqual(result.json, body(1));
+      assert.equal(result.raw, `${JSON.stringify(body(1))}\n`);
+      assert.equal(result.headers["cache-control"], "no-cache");
+      assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
+      assert.equal(result.headers["x-content-type-options"], "nosniff");
+      assert.equal(result.headers["access-control-allow-origin"], "https://site.test");
+    }
+    assert.equal(encodings, 1, "parallel foreground requests must reuse the encoded snapshot");
+
+    now = 30_000;
+    generation = 2;
+    timer.tick(); await flushRefresh();
+    assert.equal(encodings, 2, "a successful background refresh encodes exactly once");
+    assert.deepEqual((await request(address.port, "/api/content/v1/news/calendar")).json, body(2));
+    assert.equal(encodings, 2);
+
+    now = 60_000;
+    failed = true;
+    timer.tick(); await flushRefresh();
+    assert.equal(encodings, 2);
+    assert.deepEqual((await request(address.port, "/api/content/v1/news/calendar")).json, body(2));
+    assert.equal(errors.length, 1);
+
+    now = 150_000;
+    const expired = await request(address.port, "/api/content/v1/news/calendar");
+    assert.equal(expired.status, 503, "cached bytes must not bypass the maximum snapshot age");
+    assert.equal(expired.json.error, "content_backend_unavailable");
+    assert.equal(encodings, 2);
+
+    failed = false;
+    generation = 3;
+    timer.tick(); await flushRefresh();
+    assert.equal(encodings, 3);
+    assert.deepEqual((await request(address.port, "/api/content/v1/news/calendar")).json, body(3));
+    assert.equal(encodings, 3);
+  } finally { await close(server); }
+});
+
+test("calendar serialization failure cannot replace the last complete snapshot or renew its age", async () => {
+  let now = 0;
+  let badEncoding = false;
+  const timer = manualCalendarRefresh();
+  const errors: unknown[] = [];
+  const good = { buckets: [], sourceCounts: [{ ecosystemLayer: "all", sourceCount: 0 }] };
+  const cache = createNewsCalendarCache({
+    async readNewsCalendar() {
+      return badEncoding ? { ...good, toJSON() { throw new Error("calendar encoding failed"); } } : good;
+    },
+  }, { now: () => now, refreshIntervalMs: 30_000, maxStaleMs: 120_000, scheduleRefresh: timer.schedule, onError: (error) => errors.push(error) });
+  await cache.prime();
+  badEncoding = true;
+  now = 30_000;
+  timer.tick(); await flushRefresh();
+  assert.strictEqual(await cache.read(), good);
+  assert.equal(errors.length, 1);
+  now = 120_000;
+  assert.equal(cache.isReady(), false);
+  await assert.rejects(cache.read(), /snapshot.*unavailable/i);
+  cache.close();
+});
+
 test("news response cache bounds retained query keys", async () => {
   let calls = 0;
   const cache = createNewsResponseCache(
