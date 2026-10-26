@@ -116,3 +116,79 @@ test("PostgreSQL repository keeps Notion cursor and manifest reads parameterized
   assert.deepEqual(calls[0]!.values, ["notion-folder"]);
   assert.match(calls[1]!.statement, /WHERE "notion_page_id" = \$1 LIMIT 1$/);
 });
+
+test("existing news lookup returns only requested known IDs in stable input order", async () => {
+  const calls: Array<{ statement: string; values: readonly unknown[] }> = [];
+  const repository = createPostgresContentRepository({
+    executor: {
+      async query(statement, values) {
+        calls.push({ statement, values });
+        return { rowCount: 5, rows: [
+          { external_id: "known-two" }, { external_id: "not-requested" },
+          { external_id: "known-one" }, { external_id: "known-one" }, { external_id: 42 },
+        ] };
+      },
+    },
+  });
+  assert.ok(repository.findExistingNewsIds, "PostgreSQL must support cross-run identity lookup");
+  const found = await repository.findExistingNewsIds(["known-one", "unknown-one", "known-two", "known-one"]);
+  assert.deepEqual(found, ["known-one", "known-two"]);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.statement, 'SELECT "external_id" FROM "news_items" WHERE "external_id" = ANY($1::text[])');
+  assert.deepEqual(calls[0]!.values, [["known-one", "unknown-one", "known-two"]]);
+});
+
+test("existing news lookup bounds each parameter array to 500 unique IDs", async () => {
+  const calls: unknown[][] = [];
+  const repository = createPostgresContentRepository({
+    executor: {
+      async query(_statement, values) {
+        const ids = values[0] as string[];
+        calls.push([...ids]);
+        return { rowCount: 1, rows: [{ external_id: ids[0] }] };
+      },
+    },
+  });
+  const ids = Array.from({ length: 1001 }, (_, index) => `existing-${index}`);
+  assert.ok(repository.findExistingNewsIds);
+  assert.deepEqual(await repository.findExistingNewsIds([...ids, ids[0]!]), [ids[0], ids[500], ids[1000]]);
+  assert.deepEqual(calls.map((batch) => batch.length), [500, 500, 1]);
+  assert.deepEqual(calls.flat(), ids);
+});
+
+test("SQL-like external IDs remain bound values rather than executable query text", async () => {
+  const hostileId = "news-'); DROP TABLE news_items; --";
+  const repository = createPostgresContentRepository({
+    executor: {
+      async query(statement, values) {
+        assert.equal(statement, 'SELECT "external_id" FROM "news_items" WHERE "external_id" = ANY($1::text[])');
+        assert.doesNotMatch(statement, /DROP TABLE/);
+        assert.deepEqual(values, [[hostileId]]);
+        return { rowCount: 1, rows: [{ external_id: hostileId }] };
+      },
+    },
+  });
+  assert.ok(repository.findExistingNewsIds);
+  assert.deepEqual(await repository.findExistingNewsIds([hostileId]), [hostileId]);
+});
+
+test("empty and invalid identity inputs never issue a database query", async () => {
+  let calls = 0;
+  const repository = createPostgresContentRepository({
+    executor: { async query() { calls += 1; throw new Error("must not query"); } },
+  });
+  assert.ok(repository.findExistingNewsIds);
+  assert.deepEqual(await repository.findExistingNewsIds([]), []);
+  assert.deepEqual(await repository.findExistingNewsIds(["", "   ", null, undefined, 42, "bad\u0000id", "x".repeat(1025)] as unknown as string[]), []);
+  await assert.rejects(repository.findExistingNewsIds(null as unknown as string[]), /externalIds must be an array/);
+  assert.equal(calls, 0);
+});
+
+test("existing news lookup propagates database failure instead of reporting unknown IDs", async () => {
+  const failure = new Error("news identity lookup connection failed");
+  const repository = createPostgresContentRepository({
+    executor: { async query() { throw failure; } },
+  });
+  assert.ok(repository.findExistingNewsIds);
+  await assert.rejects(repository.findExistingNewsIds(["known-one"]), (error) => error === failure);
+});

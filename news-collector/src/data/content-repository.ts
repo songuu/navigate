@@ -26,6 +26,8 @@ export type ContentRepositoryProvider = "supabase" | "mysql" | "postgres";
 export interface ContentRepository {
   readonly provider: ContentRepositoryProvider;
   upsertNewsItems(items: readonly NewsItem[]): Promise<ContentUpsertResult>;
+  /** Query stored identities before spending article-fetch or model budgets. */
+  findExistingNewsIds?(externalIds: readonly string[]): Promise<readonly string[]>;
   upsertNotionArticles(articles: readonly NotionArticle[]): Promise<ContentUpsertResult>;
   /** 为 frontier/interview/glossary 等现有 worker 提供的同一幂等表写入能力。 */
   upsertTableRows(table: ContentTableName, rows: readonly ContentRow[]): Promise<ContentUpsertResult>;

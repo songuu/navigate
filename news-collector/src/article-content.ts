@@ -1,5 +1,7 @@
 // 原文正文抽取：从新闻 URL 抓取 HTML，提取可在站内展示的正文截断。
-// 只在 Node collector 端运行；前端仍只读 Supabase anon，不跨域抓第三方页面。
+// 只在 Node collector 端运行；前端只读 Content API，不跨域抓第三方页面。
+
+import {safeArticleFetch,validateArticleUrl,isArticleSafetyError,type ResolveArticleHost} from './article-http.ts';
 
 export type ArticleContentStatus = "not_fetched" | "fetched" | "empty" | "failed";
 
@@ -14,6 +16,7 @@ export interface ArticleContentResult {
 export interface FetchArticleContentOptions {
   readonly timeoutMs?: number;
   readonly now?: Date;
+  readonly resolveImpl?: ResolveArticleHost;
 }
 
 const DEFAULT_TIMEOUT_MS = 12_000;
@@ -24,7 +27,7 @@ const USER_AGENT = "agent-build-news-collector/1.0 (+https://github.com/songuu/a
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36";
 const ACCEPT_HTML = "text/html, application/xhtml+xml;q=0.9, */*;q=0.2";
-const READER_PREFIX = "https://r.jina.ai/http://";
+const READER_PREFIX = "https://r.jina.ai/";
 
 const ENTITY_MAP: Readonly<Record<string, string>> = {
   amp: "&",
@@ -45,10 +48,12 @@ const ENTITY_MAP: Readonly<Record<string, string>> = {
 export async function fetchArticleContent(
   url: string,
   options: FetchArticleContentOptions = {},
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl?: typeof fetch,
 ): Promise<ArticleContentResult> {
   const fetchedAt = (options.now ?? new Date()).toISOString();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadline=Date.now()+timeoutMs;
+  try{validateArticleUrl(url);}catch(error){return emptyResult('failed',fetchedAt,error instanceof Error?error.message:'正文地址无效。');}
   const skipReason = knownArticleContentSkipReason(url);
   if (skipReason) return emptyResult("empty", fetchedAt, skipReason);
 
@@ -56,14 +61,17 @@ export async function fetchArticleContent(
     accept: ACCEPT_HTML,
     extractor: extractArticleTextFromHtml,
     userAgent: USER_AGENT,
+    resolveImpl: options.resolveImpl,
   });
 
   if (directResult.status === "fetched") return directResult;
+  if(directResult.safetyRejected||Date.now()>=deadline){const {safetyRejected:_,...result}=directResult;return result;}
 
-  const readerResult = await fetchAndExtractArticle(toReaderUrl(url), fetchedAt, timeoutMs, fetchImpl, {
+  const readerResult = await fetchAndExtractArticle(toReaderUrl(url), fetchedAt, Math.max(1,deadline-Date.now()), fetchImpl, {
     accept: "text/plain, text/markdown;q=0.9, */*;q=0.2",
     extractor: extractArticleTextFromReaderMarkdown,
     userAgent: BROWSER_USER_AGENT,
+    resolveImpl: options.resolveImpl,
   });
 
   if (readerResult.status === "fetched") return readerResult;
@@ -136,23 +144,26 @@ interface ExtractRequest {
   readonly accept: string;
   readonly extractor: (text: string) => string;
   readonly userAgent: string;
+  readonly resolveImpl?: ResolveArticleHost;
 }
+
+interface ExtractedArticleResult extends ArticleContentResult{readonly safetyRejected?:boolean;}
 
 async function fetchAndExtractArticle(
   url: string,
   fetchedAt: string,
   timeoutMs: number,
-  fetchImpl: typeof fetch,
+  fetchImpl: typeof fetch | undefined,
   request: ExtractRequest,
-): Promise<ArticleContentResult> {
+): Promise<ExtractedArticleResult> {
   try {
-    const response = await fetchImpl(url, {
+    const response = await safeArticleFetch(url, {
       headers: {
         "User-Agent": request.userAgent,
         Accept: request.accept,
         "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7",
       },
-      signal: AbortSignal.timeout(timeoutMs),
+      timeoutMs,resolveImpl:request.resolveImpl,fetchImpl,
     });
 
     if (!response.ok) {
@@ -177,11 +188,11 @@ async function fetchAndExtractArticle(
       fetchedAt,
     };
   } catch (error: unknown) {
-    return emptyResult(
+    return {...emptyResult(
       "failed",
       fetchedAt,
       error instanceof Error ? error.message : String(error),
-    );
+    ),...(isArticleSafetyError(error)?{safetyRejected:true}:{})};
   }
 }
 

@@ -29,6 +29,8 @@ export function formatReport(report: CollectReport): string {
       `translation=${report.translated} translated skipped=${report.translationSkipped} failed=${report.translationFailed} ` +
       `enriched=${report.enriched} stored=${report.stored} table=${report.tableCount}`,
   );
+  if(report.collection){const c=report.collection;lines.push(`  screening: raw=${c.rawFetched} outside_window=${c.outsideWindow} undated=${c.undated} rejected=${c.rejected} url_unique=${c.afterUrlDedupe} existing_skipped=${c.existingSkipped}`);}
+  if(report.editorial){const e=report.editorial;lines.push(`  editorial: considered=${e.considered} analyzed=${e.analyzed} analysis_failed=${e.analysisFailed} irrelevant=${e.irrelevant} below_threshold=${e.belowThreshold} topic_duplicates=${e.topicDuplicates} quota_skipped=${e.quotaSkipped} selected=${e.selected}`);}
 
   return lines.join("\n");
 }

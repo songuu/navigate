@@ -9,12 +9,33 @@ import {
   parseHackerNewsAlgoliaJson,
 } from "../src/rss.ts";
 import type { NewsSource } from "../src/types.ts";
+import {toNewsItem} from '../src/normalize.ts';
+import {classify} from '../src/classify.ts';
 
 test("parses an RSS 2.0 fixture", async () => {
   const items = await parseFeedString(readFixture("qbitai-sample.xml"));
   assert.ok(items.length >= 3, "expected >= 3 items");
   assert.ok(items[0].title.length > 0);
   assert.ok(items[0].link.startsWith("http"));
+});
+
+test('RSS content:encoded preserves the full article rather than the short description',async()=>{
+  const body='<p>'+('A detailed AI engineering article. '.repeat(30))+'</p>';
+  const xml=`<?xml version="1.0"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><title>AI Blog</title><link>https://example.com</link><description>AI articles</description><item><title>AI engineering</title><link>https://example.com/article</link><description><![CDATA[Short preview]]></description><content:encoded><![CDATA[${body}]]></content:encoded></item></channel></rss>`;
+  const items=await parseFeedString(xml);assert.equal(items.length,1);assert.equal(items[0]?.content,body);assert.equal(items[0]?.contentSnippet,'Short preview');assert.equal(items[0]?.contentIsFull,true);
+});
+
+test('a long real RSS description is still a preview, not fetched article content',async()=>{
+  const preview='An AI news preview with more details. '.repeat(20),xml=`<rss version="2.0"><channel><title>Feed</title><link>https://example.com</link><description>Feed</description><item><title>AI news</title><link>https://example.com/a</link><description>${preview}</description></item></channel></rss>`;
+  const [rawItem]=await parseFeedString(xml);assert.ok(rawItem);assert.equal(rawItem.contentIsFull,false);
+  const source:NewsSource={key:'rss',name:'Feed',url:'https://example.com/feed',kind:'en-media',lang:'en',enabled:true};
+  const normalized=toNewsItem({source,rawItem,classification:classify({title:rawItem.title},source),now:new Date('2026-10-26T00:00:00Z')});assert.equal(normalized.contentStatus,'not_fetched');
+});
+
+test('Atom inline content carries full-content provenance; binary content does not',async()=>{
+  const body='Detailed AI article content. '.repeat(20);
+  const xml=`<feed xmlns="http://www.w3.org/2005/Atom"><title>Feed</title><entry><title>AI text</title><link href="https://example.com/a"/><content type="text">${body}</content></entry><entry><title>Binary payload</title><link href="https://example.com/b"/><summary>Public preview</summary><content type="application/octet-stream">AAAA</content></entry></feed>`;
+  const items=await parseFeedString(xml);assert.equal(items[0]?.contentIsFull,true);assert.equal(items[1]?.contentIsFull,false);assert.doesNotMatch(items[1]?.content??'',/AAAA/);
 });
 
 test("parses an Atom fixture (link href + id + summary)", async () => {

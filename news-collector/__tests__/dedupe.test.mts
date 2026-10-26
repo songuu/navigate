@@ -88,3 +88,20 @@ test("keeps distinct items and preserves first-seen order", () => {
 test("empty input → empty output", () => {
   assert.deepEqual(dedupe([]), []);
 });
+
+test("same URL retains the richer body and merged-source evidence without changing primary attribution",()=>{
+  const first=item({externalId:'first',sourceKey:'hn',sourceName:'HN',url:'https://example.com/a',contentText:'A short preview.',metadata:{keep:'first'}});
+  const richer=item({externalId:'second',sourceKey:'blog',sourceName:'AI Blog',url:'https://example.com/a',contentText:'Full AI article. '.repeat(100),contentStatus:'fetched',contentFetchedAt:'2026-10-26T00:00:00Z',metadata:{articleContent:{origin:'feed'}}});
+  const out=dedupe([first,richer]);assert.equal(out.length,1);assert.equal(out[0]?.externalId,'first');assert.equal(out[0]?.sourceKey,'hn');assert.equal(out[0]?.contentText,richer.contentText);assert.equal(out[0]?.contentStatus,'fetched');
+  assert.equal(out[0]?.metadata.keep,'first');assert.deepEqual(out[0]?.metadata.mergedSources,[{sourceKey:'hn',sourceName:'HN',url:first.url},{sourceKey:'blog',sourceName:'AI Blog',url:richer.url}]);
+  assert.equal(first.contentText,'A short preview.');assert.deepEqual(first.metadata,{keep:'first'});
+});
+
+test("different release versions remain separate",()=>{
+  assert.equal(dedupe([item({externalId:'a',title:'Claude 4.1 release',url:'https://example.com/41'}),item({externalId:'b',title:'Claude 4.2 release',url:'https://example.com/42'})]).length,2);
+});
+
+test('a fetched body is preferred over a longer unverified preview',()=>{
+  const out=dedupe([item({externalId:'a',url:'https://example.com/a',contentText:'Preview '.repeat(100),contentStatus:'not_fetched'}),item({externalId:'b',url:'https://example.com/a',contentText:'Verified original body.',contentStatus:'fetched'})]);
+  assert.equal(out[0]?.contentText,'Verified original body.');assert.equal(out[0]?.contentStatus,'fetched');
+});

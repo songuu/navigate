@@ -4,6 +4,7 @@
 // 只走环境变量（配合 `--env-file=.env`），绝不写入任何 tracked 文件。
 
 import type { ProviderName } from "../../src/shared/llm/index.ts";
+import type {EditorialOptions} from './editorial.ts';
 import { z } from "zod";
 import {
   loadContentRepositoryConfig,
@@ -53,6 +54,17 @@ const envSchema = z.object({
   NEWS_FEED_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   // 每源最多取多少条（按 feed 顺序，通常最新在前），防止 arXiv 这类高产源淹没每日 feed。
   NEWS_MAX_PER_SOURCE: z.coerce.number().int().positive().default(30),
+  NEWS_LOOKBACK_HOURS: z.coerce.number().min(1).max(720).default(24),
+  NEWS_SKIP_EXISTING: boolFromEnv(true),
+  NEWS_EDITORIAL_ENABLED: boolFromEnv(true),
+  NEWS_EDITORIAL_MAX_ANALYZE: z.coerce.number().int().min(0).max(200).default(40),
+  NEWS_EDITORIAL_THRESHOLD: z.coerce.number().min(0).max(10).default(7),
+  NEWS_EDITORIAL_MAX_ITEMS: z.coerce.number().int().min(1).max(200).default(40),
+  NEWS_EDITORIAL_MAX_PER_LAYER: z.coerce.number().int().min(1).max(100).default(10),
+  NEWS_EDITORIAL_MAX_PER_SOURCE: z.coerce.number().int().min(1).max(100).default(5),
+  NEWS_EDITORIAL_CONCURRENCY: z.coerce.number().int().min(1).max(4).default(2),
+  NEWS_EDITORIAL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(120000).default(30000),
+  NEWS_EDITORIAL_MODEL: optionalEnvString,
   // 富化条数上限；0 = 不富化（即便配了 key 也需显式开，避免默认烧 token）。
   NEWS_ENRICH_MAX: z.coerce.number().int().min(0).default(0),
   // 翻译是独立的成本开关：需显式开启，且仍受 provider 凭据门控。
@@ -94,6 +106,9 @@ export interface RunConfig {
   readonly feedTimeoutMs: number;
   readonly feedConcurrency: number;
   readonly maxPerSource: number;
+  readonly lookbackHours:number;
+  readonly skipExisting:boolean;
+  readonly editorial:EditorialOptions;
   readonly enrichMax: number;
   readonly enrichProvider: ProviderName;
   readonly enrichModel?: string;
@@ -156,6 +171,20 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): RunConfig {
     feedTimeoutMs: env.NEWS_FEED_TIMEOUT_MS,
     feedConcurrency: env.NEWS_FEED_CONCURRENCY,
     maxPerSource: env.NEWS_MAX_PER_SOURCE,
+    lookbackHours:env.NEWS_LOOKBACK_HOURS,
+    skipExisting:env.NEWS_SKIP_EXISTING,
+    editorial:{
+      enabled:env.NEWS_EDITORIAL_ENABLED,
+      maxAnalyze:hasProviderCredential(env)?env.NEWS_EDITORIAL_MAX_ANALYZE:0,
+      threshold:env.NEWS_EDITORIAL_THRESHOLD,
+      maxItems:env.NEWS_EDITORIAL_MAX_ITEMS,
+      maxPerLayer:env.NEWS_EDITORIAL_MAX_PER_LAYER,
+      maxPerSource:env.NEWS_EDITORIAL_MAX_PER_SOURCE,
+      concurrency:env.NEWS_EDITORIAL_CONCURRENCY,
+      timeoutMs:env.NEWS_EDITORIAL_TIMEOUT_MS,
+      provider:env.LLM_PROVIDER,
+      model:env.NEWS_EDITORIAL_MODEL||env.NEWS_TRANSLATION_MODEL||env.NEWS_ENRICH_MODEL,
+    },
     enrichMax: hasProviderCredential(env) ? env.NEWS_ENRICH_MAX : 0,
     enrichProvider: env.LLM_PROVIDER,
     enrichModel: env.NEWS_ENRICH_MODEL,

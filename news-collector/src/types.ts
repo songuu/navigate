@@ -95,6 +95,8 @@ export interface RawFeedItem {
   readonly link: string;
   readonly contentSnippet?: string;
   readonly content?: string;
+  /** True only for an explicit full-content field, never an RSS description preview. */
+  readonly contentIsFull?: boolean;
   /** Atom <summary> 常映射到这里（无 content 时的摘要来源）。 */
   readonly summary?: string;
   readonly isoDate?: string;

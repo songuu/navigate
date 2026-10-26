@@ -130,3 +130,19 @@ test("toNewsItem uses the Beijing calendar date across the UTC day boundary", ()
   assert.equal(item.collectedDate, "2026-07-21");
   assert.equal(item.publishedDate, "2026-07-21");
 });
+
+test("feed full text stays richer than the display snippet and is bounded", () => {
+  const source:NewsSource={key:'blog',name:'AI Blog',url:'https://example.com/feed',kind:'vendor-blog',lang:'en',enabled:true};
+  const body='<p>'+('A detailed explanation of AI inference architecture. '.repeat(20))+'</p><p>'+('Practical measurements and engineering results. '.repeat(180))+'</p>';
+  const rawItem={title:'AI inference',link:'https://example.com/full',contentSnippet:'A short summary.',content:body,contentIsFull:true};
+  const item=toNewsItem({source,rawItem,classification:classify({title:rawItem.title,summary:rawItem.contentSnippet},source),now:new Date('2026-10-26T00:00:00Z')});
+  assert.equal(item.summary,'A short summary.');assert.ok(item.contentText.length>1000);assert.ok(item.contentText.length<=6000);assert.equal(item.contentStatus,'fetched');
+  assert.deepEqual(item.metadata.articleContent,{origin:'feed',status:'fetched',fetchedAt:'2026-10-26T00:00:00.000Z'});
+});
+
+test("a long snippet alone is not declared a fetched article, and script/style content is excluded",()=>{
+  const source:NewsSource={key:'feed',name:'Feed',url:'https://example.com/feed',kind:'en-media',lang:'en',enabled:true};
+  const rawItem={title:'AI report',link:'https://example.com/a',contentSnippet:'Summary sentence. '.repeat(40),content:'<script>secret()</script><style>hidden</style><p>Short body</p>'};
+  const item=toNewsItem({source,rawItem,classification:classify({title:rawItem.title},source),now:new Date('2026-10-26T00:00:00Z')});
+  assert.equal(item.contentStatus,'not_fetched');assert.ok(item.summary.length<=200);assert.doesNotMatch(item.contentText,/secret|hidden/);
+});

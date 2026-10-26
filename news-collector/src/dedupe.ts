@@ -15,9 +15,9 @@ function normalizeTitle(title: string): string {
 }
 
 export function dedupe(items: readonly NewsItem[]): NewsItem[] {
-  const seenIds = new Set<string>();
-  const seenUrls = new Set<string>();
-  const seenSourceTitleDays = new Set<string>();
+  const seenIds = new Map<string,number>();
+  const seenUrls = new Map<string,number>();
+  const seenSourceTitleDays = new Map<string,number>();
   const result: NewsItem[] = [];
 
   for (const item of items) {
@@ -26,18 +26,25 @@ export function dedupe(items: readonly NewsItem[]): NewsItem[] {
       item.publishedDate,
       normalizeTitle(item.title),
     ].join("::");
-    if (
-      seenIds.has(item.externalId) ||
-      seenUrls.has(item.url) ||
-      seenSourceTitleDays.has(sourceTitleDayKey)
-    ) {
-      continue;
-    }
-    seenIds.add(item.externalId);
-    seenUrls.add(item.url);
-    seenSourceTitleDays.add(sourceTitleDayKey);
-    result.push(item);
+    const existing=seenIds.get(item.externalId)??seenUrls.get(item.url)??seenSourceTitleDays.get(sourceTitleDayKey);
+    const index=existing??result.length;
+    if(existing===undefined)result.push(item);
+    else result[index]=mergeDuplicate(result[index]!,item);
+    seenIds.set(item.externalId,index);seenUrls.set(item.url,index);seenSourceTitleDays.set(sourceTitleDayKey,index);
   }
 
   return result;
+}
+
+function mergeDuplicate(first:NewsItem,incoming:NewsItem):NewsItem{
+  const richer=(incoming.contentStatus==='fetched'&&first.contentStatus!=='fetched')||(incoming.contentText.length>first.contentText.length&&!(first.contentStatus==='fetched'&&incoming.contentStatus!=='fetched'))?incoming:first;
+  const evidence=new Map<string,{sourceKey:string;sourceName:string;url:string}>();
+  for(const item of [first,incoming]){
+    const prior=Array.isArray(item.metadata.mergedSources)?item.metadata.mergedSources:[];
+    for(const source of [...prior,{sourceKey:item.sourceKey,sourceName:item.sourceName,url:item.url}]){
+      if(source&&typeof source==='object'&&typeof source.sourceKey==='string'&&typeof source.sourceName==='string'&&typeof source.url==='string')evidence.set(source.sourceKey+'\n'+source.url,{sourceKey:source.sourceKey,sourceName:source.sourceName,url:source.url});
+    }
+  }
+  return {...first,contentText:richer.contentText,contentExcerpt:richer.contentExcerpt,contentStatus:richer.contentStatus,contentFetchedAt:richer.contentFetchedAt,
+    metadata:{...first.metadata,...(richer.metadata.articleContent?{articleContent:richer.metadata.articleContent}:{}),mergedSources:[...evidence.values()]}};
 }

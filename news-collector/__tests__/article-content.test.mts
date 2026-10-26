@@ -81,7 +81,7 @@ If you want to find out just how badly Meta bungled the creation of its new Appl
     if (requestUrl === sourceUrl) {
       return new Response("blocked", { status: 403, headers: { "content-type": "text/html" } });
     }
-    if (requestUrl === `https://r.jina.ai/http://${sourceUrl}`) {
+    if (requestUrl === `https://r.jina.ai/${sourceUrl}`) {
       return new Response(readerMarkdown, { status: 200, headers: { "content-type": "text/plain" } });
     }
     throw new Error(`unexpected URL ${requestUrl}`);
@@ -89,11 +89,11 @@ If you want to find out just how badly Meta bungled the creation of its new Appl
 
   const result = await fetchArticleContent(
     sourceUrl,
-    { now: new Date("2026-06-24T00:00:00.000Z") },
+    { now: new Date("2026-06-24T00:00:00.000Z"),resolveImpl:async()=>[{address:'93.184.216.34',family:4}] },
     fetchImpl as typeof fetch,
   );
 
-  assert.deepEqual(seenUrls, [sourceUrl, `https://r.jina.ai/http://${sourceUrl}`]);
+  assert.deepEqual(seenUrls, [sourceUrl, `https://r.jina.ai/${sourceUrl}`]);
   assert.equal(result.status, "fetched");
   assert.match(result.text, /A leaked internal memo/);
   assert.match(result.text, /If you want to find out/);
@@ -129,4 +129,20 @@ test("buildArticleExcerpt uses first readable paragraph", () => {
 test("truncatePlainText caps long text", () => {
   assert.equal(truncatePlainText("abcdef", 4), "abc…");
   assert.equal(truncatePlainText("abc", 4), "abc");
+});
+
+test('unsafe originals and private DNS results never reach the direct or reader transport',async()=>{
+  let calls=0;const fetchImpl=async()=>{calls++;return new Response('');};
+  const literal=await fetchArticleContent('http://169.254.169.254/latest',{},fetchImpl as typeof fetch);
+  assert.equal(literal.status,'failed');assert.equal(calls,0);
+  const resolved=await fetchArticleContent('https://example.com/a',{resolveImpl:async()=>[{address:'127.0.0.1',family:4}]},fetchImpl as typeof fetch);
+  assert.equal(resolved.status,'failed');assert.equal(calls,0);
+  const invalid=await fetchArticleContent('https://example.com/a',{resolveImpl:async()=>{throw new Error('DNS unavailable');}},fetchImpl as typeof fetch);
+  assert.equal(invalid.status,'failed');assert.equal(calls,0);
+});
+
+test('redirects to private addresses are rejected without reader fallback',async()=>{
+  const seen:string[]=[];
+  const result=await fetchArticleContent('https://example.com/a',{resolveImpl:async()=>[{address:'93.184.216.34',family:4}]},(async(input)=>{seen.push(String(input));return new Response(null,{status:302,headers:{location:'http://10.0.0.1/private'}});}) as typeof fetch);
+  assert.equal(result.status,'failed');assert.deepEqual(seen,['https://example.com/a']);
 });

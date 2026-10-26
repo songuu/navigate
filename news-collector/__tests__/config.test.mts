@@ -2,6 +2,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { loadConfig } from "../src/config.ts";
 
+test('Horizon editorial defaults enable bounded screening with explicit model budget and UTC lookback',()=>{
+  const config=loadConfig({});
+  assert.equal(config.lookbackHours,24);assert.equal(config.skipExisting,true);assert.equal(config.editorial.enabled,true);
+  assert.equal(config.editorial.maxAnalyze,0);assert.equal(config.editorial.maxItems,40);assert.equal(config.editorial.threshold,7);
+  const ai=loadConfig({LLM_PROVIDER:'ollama',NEWS_EDITORIAL_MAX_ANALYZE:'12',NEWS_LOOKBACK_HOURS:'48',NEWS_SKIP_EXISTING:'false'});
+  assert.equal(ai.editorial.maxAnalyze,12);assert.equal(ai.lookbackHours,48);assert.equal(ai.skipExisting,false);
+  assert.throws(()=>loadConfig({NEWS_EDITORIAL_THRESHOLD:'11'}));assert.throws(()=>loadConfig({NEWS_LOOKBACK_HOURS:'0'}));
+});
+
 test("blank LLM keys disable enrichment instead of failing config parsing", () => {
   const config = loadConfig({
     LLM_PROVIDER: "anthropic",

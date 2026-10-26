@@ -1,0 +1,25 @@
+[Unit]
+Description=Validate Horizon-style Navigate collection with a small live budget
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=navigate
+Group=navigate
+WorkingDirectory=/opt/navigate/current
+Environment=NODE_ENV=production
+Environment=CONTENT_REPOSITORY_POSTGRES_ONLY=true
+Environment=CONTENT_REPOSITORY_DRIVER=postgres
+RuntimeDirectory=navigate-news
+# Process overrides win over Node's env-file for this bounded manual run only.
+ExecStart=/usr/bin/flock -n /run/navigate-news/collector.lock /usr/bin/env NEWS_FEISHU_WEBHOOK_URL= NEWS_FEISHU_WEBHOOK_SECRET= NEWS_EDITORIAL_ENABLED=true NEWS_ENRICH_MAX=0 NEWS_EDITORIAL_MAX_ANALYZE=6 NEWS_EDITORIAL_MAX_ITEMS=6 NEWS_ARTICLE_CONTENT_MAX_ITEMS=6 NEWS_TRANSLATION_MAX_ITEMS=3 /usr/bin/node --experimental-transform-types --env-file=/opt/navigate/shared/news-collector.env news-collector/src/cli-collect.ts
+Restart=no
+TimeoutStartSec=15min
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/navigate
+StandardOutput=journal
+StandardError=journal

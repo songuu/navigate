@@ -12,14 +12,15 @@ import type { ProviderName } from "../../src/shared/llm/index.ts";
 import type { RunConfig, SupabaseConfig } from "./config.ts";
 import { dedupe } from "./dedupe.ts";
 import { enrichItems } from "./enrich.ts";
-import { toNewsItem } from "./normalize.ts";
+import { toNewsItem,parsePublishedAt } from "./normalize.ts";
+import {editorialSelect,type EditorialOptions,type EditorialStats} from './editorial.ts';
 import { fetchArticleContent, type ArticleContentResult } from "./article-content.ts";
 import { translateItems, type TranslationClient } from "./translate.ts";
 import type { ContentRepository } from "./data/content-repository.ts";
 import { openContentRepositoryForWorkers } from "./data/runtime.ts";
 import { fetchFeed, type FeedResult } from "./rss.ts";
 import { enabledSources } from "./sources.ts";
-import type { NewsItem, NewsSource } from "./types.ts";
+import {newsItemSchema,type NewsItem,type NewsSource} from "./types.ts";
 
 const ARTICLE_CONTENT_CONCURRENCY = 4;
 const DEFAULT_FEED_CONCURRENCY = 4;
@@ -53,6 +54,8 @@ export interface CollectReport {
   readonly tableCount: string;
   readonly dryRun: boolean;
   readonly items: readonly NewsItem[];
+  readonly collection?:{readonly rawFetched:number;readonly outsideWindow:number;readonly undated:number;readonly rejected:number;readonly existingSkipped:number;readonly afterUrlDedupe:number};
+  readonly editorial?:EditorialStats;
 }
 
 export type FetchFeedImpl = (
@@ -71,7 +74,10 @@ export interface CollectOptions {
   readonly dryRun?: boolean;
   readonly supabase?: SupabaseConfig | null;
   /** 首选写入端口；supabase 参数仅用于拒绝旧调用，不能再写入。 */
-  readonly contentRepository?: Pick<ContentRepository, "upsertNewsItems">;
+  readonly contentRepository?: Pick<ContentRepository, "upsertNewsItems"> & Partial<Pick<ContentRepository,'findExistingNewsIds'>>;
+  readonly lookbackHours?:number;
+  readonly skipExisting?:boolean;
+  readonly editorial?:EditorialOptions;
   readonly feedTimeoutMs?: number;
   /** 同时抓取的源数；限制同一供应商的连接突发。 */
   readonly feedConcurrency?: number;
@@ -113,6 +119,9 @@ export async function collectOnce(options: CollectOptions = {}): Promise<Collect
 
   const collected: NewsItem[] = [];
   const sourceOutcomes: SourceOutcome[] = [];
+  const collection={rawFetched:0,outsideWindow:0,undated:0,rejected:0,existingSkipped:0,afterUrlDedupe:0};
+  const lookback=options.lookbackHours;
+  if(lookback!==undefined&&(!Number.isFinite(lookback)||lookback<1||lookback>720))throw new Error('采集时间窗口需为1–720小时。');
   for (const result of feedResults) {
     if (!result.ok) {
       sourceOutcomes.push({
@@ -127,10 +136,15 @@ export async function collectOnce(options: CollectOptions = {}): Promise<Collect
       });
       continue;
     }
+    collection.rawFetched+=result.items.length;
+    const recent=lookback===undefined?result.items:result.items.filter(raw=>{
+      const published=parsePublishedAt(raw);if(!published){collection.undated++;return true;}
+      const time=Date.parse(published);if(time<start.getTime()-lookback*3600000||time>start.getTime()+300000){collection.outsideWindow++;return false;}return true;
+    });
     const capped =
       options.maxPerSource !== undefined
-        ? result.items.slice(0, options.maxPerSource)
-        : result.items;
+        ? recent.slice(0, options.maxPerSource)
+        : recent;
     // fetched 报告封顶后实际进入管道的条数，保证与 totalFetched 可对账。
     sourceOutcomes.push({
       key: result.source.key,
@@ -142,6 +156,7 @@ export async function collectOnce(options: CollectOptions = {}): Promise<Collect
       diagnostics: result.diagnostics,
     });
     for (const rawItem of capped) {
+      try{
       const classification = classify(
         {
           title: rawItem.title,
@@ -149,11 +164,22 @@ export async function collectOnce(options: CollectOptions = {}): Promise<Collect
         },
         result.source,
       );
-      collected.push(toNewsItem({ source: result.source, rawItem, classification, now: start }));
+      const normalized=toNewsItem({ source: result.source, rawItem, classification, now: start });
+      const parsedUrl=new URL(normalized.url);
+      if(!['https:','http:'].includes(parsedUrl.protocol)||parsedUrl.username||parsedUrl.password)throw new Error('Article URL must be a credential-free HTTP(S) URL.');
+      newsItemSchema.parse(normalized);collected.push(normalized);
+      }catch{collection.rejected++;}
     }
   }
 
   let items = dedupe(collected);
+  collection.afterUrlDedupe=items.length;
+  if(options.skipExisting&&contentRepository?.findExistingNewsIds&&items.length){
+    const existing=new Set(await contentRepository.findExistingNewsIds(items.map(item=>item.externalId)));
+    const before=items.length;items=items.filter(item=>!existing.has(item.externalId));collection.existingSkipped=before-items.length;
+  }
+  let editorial:EditorialStats|undefined;
+  if(options.editorial?.enabled){const selected=await editorialSelect(items,{...options.editorial,now:start});items=selected.items;editorial=selected.stats;}
 
   const translationMaxItems = options.translationMaxItems ?? 0;
   if (options.articleContentEnabled) {
@@ -199,9 +225,8 @@ export async function collectOnce(options: CollectOptions = {}): Promise<Collect
   const translationFailed = items.filter((item) => item.translationStatus === "failed").length;
   const translationSkipped = items.filter((item) => item.translationStatus === "skipped").length;
   if (!dryRun && contentRepository) {
-    const result = await contentRepository.upsertNewsItems(items);
-    stored = result.pushed;
-    tableCount = result.tableCount;
+    if(items.length){const result = await contentRepository.upsertNewsItems(items);stored = result.pushed;tableCount = result.tableCount;}
+    else tableCount='unchanged';
   } else if (!dryRun && supabase) {
     throw new Error("Supabase/PostgREST data uploads are disabled for news collection; configure the server PostgreSQL content repository.");
   } else if (!dryRun) {
@@ -227,6 +252,8 @@ export async function collectOnce(options: CollectOptions = {}): Promise<Collect
     translationFailed,
     translationSkipped,
     items,
+    collection,
+    ...(editorial?{editorial}:{}),
   };
 }
 
@@ -245,7 +272,8 @@ async function fetchFeedsBounded(
       nextIndex += 1;
       const source = sources[index];
       if (!source) return;
-      results[index] = await fetchImpl(source, { timeoutMs });
+      try{results[index] = await fetchImpl(source, { timeoutMs });}
+      catch(error){results[index]={source,ok:false,items:[],attempts:1,error:`source adapter failed (${error instanceof Error?error.name:'unknown error'})`};}
     }
   }
 
@@ -269,7 +297,7 @@ async function attachArticleContent(
 ): Promise<NewsItem[]> {
   const maxItems = options.maxItems ?? items.length;
   const next = [...items];
-  const indexes = next.map((_, index) => index);
+  const indexes = next.map((_, index) => index).filter(index=>next[index]?.contentStatus!=='fetched');
   const prioritizedIndexes = options.preferEnglish
     ? [
         ...indexes.filter((index) => next[index]?.lang === "en"),
@@ -285,10 +313,11 @@ async function attachArticleContent(
       if (index === undefined) return;
       const item = next[index];
       if (!item) return;
-      const result = await options.fetchArticleContentImpl(item.url, {
+      let result:ArticleContentResult;
+      try{result = await options.fetchArticleContentImpl(item.url, {
         timeoutMs: options.timeoutMs,
         now: options.now,
-      });
+      });}catch(error){result={text:'',excerpt:'',status:'failed',fetchedAt:options.now.toISOString(),error:`article adapter failed (${error instanceof Error?error.name:'unknown error'})`};}
       next[index] = mergeArticleContent(item, result);
     }
   }
@@ -341,6 +370,9 @@ export async function collectFromConfig(
       feedTimeoutMs: config.feedTimeoutMs,
       feedConcurrency: config.feedConcurrency,
       maxPerSource: config.maxPerSource,
+      lookbackHours:config.lookbackHours,
+      skipExisting:config.skipExisting,
+      editorial:config.editorial,
       enrichMax: config.enrichMax,
       enrichProvider: config.enrichProvider,
       enrichModel: config.enrichModel,

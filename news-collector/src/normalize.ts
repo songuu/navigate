@@ -2,7 +2,7 @@
 //
 // 关键不变量：
 // - 收集身份 externalId = canonical URL 的 sha256（去 hash/跟踪参数后），保证跨次运行幂等。
-// - feed 摘要只做最低回退；collector 后续会从原文 URL 抽取 bounded content_text。
+// - 独立保留显示摘要与 RSS 全文；只有缺少真实全文时才需要后续网络抽取。
 // - 纯转换：时间通过参数注入（now: Date），不在函数内读时钟，便于确定性单测。
 
 import { createHash } from "node:crypto";
@@ -72,7 +72,9 @@ function safeFromCodePoint(decimal: string): string {
 /** 去 HTML 标签、解码常见实体、压缩空白。用于把 feed 摘要清成纯文本。 */
 export function stripHtml(input: string): string {
   return input
+    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1>/gi, " ")
     .replace(/<[^>]*>/g, " ")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) => safeFromCodePoint(String(Number.parseInt(hex,16))))
     .replace(/&#(\d+);/g, (_, decimal: string) => safeFromCodePoint(decimal))
     .replace(/&[a-z][a-z0-9]*;/gi, (match) => NAMED_ENTITIES[match.toLowerCase()] ?? "")
     .replace(/\s+/g, " ")
@@ -123,10 +125,16 @@ const collectedDateFormatter = new Intl.DateTimeFormat("en-CA", {
 export function toNewsItem(args: NormalizeArgs): NewsItem {
   const { source, rawItem, classification, now } = args;
   const url = canonicalUrl(rawItem.link);
-  const summarySource =
-    rawItem.contentSnippet ?? rawItem.content ?? rawItem.summary ?? "";
-  const summary = truncate(cleanFeedSummary(summarySource));
-  const fallbackContentText = summary;
+  const candidates=[rawItem.contentSnippet,rawItem.content,rawItem.summary]
+    .filter((value):value is string=>typeof value==='string'&&value.trim().length>0)
+    .map(cleanFeedSummary).filter(Boolean);
+  const summary = truncate(candidates[0]??"");
+  const fullContent=cleanFeedSummary(rawItem.content??"");
+  const longest=[...candidates].sort((a,b)=>b.length-a.length)[0]??"";
+  // A feed's full content is distinct from a long preview. Only an actual
+  // content field with substantial prose can save a later network fetch.
+  const hasFeedBody=rawItem.contentIsFull===true&&(fullContent.length>=300||(fullContent.length>=80&&fullContent.length>(candidates[0]?.length??0)*1.5&&[...(rawItem.content??"").matchAll(/<p\b/gi)].length>=2));
+  const fallbackContentText=truncate(hasFeedBody?fullContent:longest,6000);
   const fallbackContentExcerpt = buildArticleExcerpt(fallbackContentText || summary);
   const collectedAt = now.toISOString();
   // 采集分区按业务时区归属；UTC 午夜前后的手工补跑不能落到前一天。
@@ -144,8 +152,8 @@ export function toNewsItem(args: NormalizeArgs): NewsItem {
     summary,
     contentText: fallbackContentText,
     contentExcerpt: fallbackContentExcerpt,
-    contentStatus: fallbackContentText ? "not_fetched" : "empty",
-    contentFetchedAt: null,
+    contentStatus: hasFeedBody ? "fetched" : fallbackContentText ? "not_fetched" : "empty",
+    contentFetchedAt: hasFeedBody ? collectedAt : null,
     titleZh: "",
     summaryZh: "",
     contentTextZh: "",
@@ -164,6 +172,7 @@ export function toNewsItem(args: NormalizeArgs): NewsItem {
       guid: rawItem.guid ?? null,
       categories: rawItem.categories ?? [],
       sourceUrl: source.url,
+      ...(hasFeedBody?{articleContent:{origin:'feed',status:'fetched',fetchedAt:collectedAt}}:{}),
     },
   };
 }

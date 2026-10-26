@@ -28,11 +28,22 @@ export interface FeedResult {
   readonly diagnostics?: string;
 }
 
+const parserFormats=new WeakMap<Parser,{isAtom:boolean}>();
 function createParser(timeoutMs: number): Parser {
-  return new Parser({
+  const format={isAtom:false};
+  const parser=new Parser({
     timeout: timeoutMs,
     headers: { "User-Agent": USER_AGENT, Accept: ACCEPT_FEED },
+    customFields:{item:[['content','__rawContent',{keepArray:true}]]},
+    xml2js:{validator:(path:string,_previous:unknown,value:unknown)=>{
+      // The actual XML root gives provenance for both parseString and parseURL;
+      // rss-parser maps RSS description into item.content, so length is unsafe.
+      if(path==='/feed')format.isAtom=true;
+      else if(path==='/rss'||path==='/rdf:RDF')format.isAtom=false;
+      return value;
+    }},
   });
+  parserFormats.set(parser,format);return parser;
 }
 
 function asString(value: unknown): string | undefined {
@@ -41,18 +52,30 @@ function asString(value: unknown): string | undefined {
   return undefined;
 }
 
-function toRawItem(item: Parser.Item): RawFeedItem {
+function toRawItem(item: Parser.Item,isAtom=false): RawFeedItem {
   const rawCategories = item.categories;
   const categories = Array.isArray(rawCategories)
     ? rawCategories.filter((c): c is string => typeof c === "string")
     : undefined;
+  const fields=item as Parser.Item&{'content:encoded'?:unknown;__rawContent?:unknown};
+  const encoded=asString(fields['content:encoded']);
+  const rawContent=Array.isArray(fields.__rawContent)?fields.__rawContent[0]:undefined;
+  const attributes=rawContent&&typeof rawContent==='object'&&rawContent.$&&typeof rawContent.$==='object'?rawContent.$ as Record<string,unknown>:{};
+  const contentType=typeof attributes.type==='string'?attributes.type.trim().toLowerCase():'text';
+  const readableAtomContent=isAtom&&rawContent!==undefined&&!attributes.src&&['text','html','xhtml','text/plain','text/html','application/xhtml+xml'].includes(contentType);
+  const contentCandidates=[encoded,readableAtomContent?asString(item.content):undefined]
+    .filter((value):value is string=>typeof value==='string'&&value.trim().length>0);
+  // WordPress commonly puts the full article in content:encoded and only a
+  // short description in content; retain the richest field for normalization.
+  const content=contentCandidates.sort((left,right)=>right.length-left.length)[0]??asString(isAtom&&rawContent!==undefined&&!readableAtomContent?item.summary:item.content);
 
   return {
     title: (asString(item.title) ?? "").trim(),
     // 个别 feed 用 guid 充当链接；link 缺失时退回 guid。
     link: (asString(item.link) ?? asString(item.guid) ?? "").trim(),
-    contentSnippet: asString(item.contentSnippet),
-    content: asString(item.content),
+    contentSnippet: asString(isAtom&&rawContent!==undefined&&!readableAtomContent?item.summary:item.contentSnippet),
+    content,
+    contentIsFull:contentCandidates.length>0,
     summary: asString(item.summary),
     isoDate: asString(item.isoDate),
     pubDate: asString(item.pubDate),
@@ -191,7 +214,8 @@ async function parseFeedUrl(
 
   for (const url of urls) {
     try {
-      return usableItems((await parser.parseURL(url)).items?.map(toRawItem) ?? []);
+      const feed=await parser.parseURL(url);
+      return usableItems(feed.items?.map(item=>toRawItem(item,parserFormats.get(parser)?.isAtom??false)) ?? []);
     } catch (parseUrlError: unknown) {
       errors.push(`${url} parseURL: ${getErrorMessage(parseUrlError)}`);
 
@@ -478,7 +502,7 @@ export async function parseFeedString(
 ): Promise<RawFeedItem[]> {
   const parser = createParser(timeoutMs);
   const feed = await parser.parseString(xml);
-  return usableItems((feed.items ?? []).map(toRawItem));
+  return usableItems((feed.items ?? []).map(item=>toRawItem(item,parserFormats.get(parser)?.isAtom??false)));
 }
 
 /** 抓取单源；**永不抛错**——失败返回 ok:false，实现单源故障隔离。 */

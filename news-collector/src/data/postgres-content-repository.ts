@@ -41,6 +41,8 @@ export interface PostgresContentRepositoryOptions {
 }
 
 const DEFAULT_CHUNK_SIZE = 100;
+const NEWS_ID_LOOKUP_CHUNK_SIZE = 500;
+const MAX_EXTERNAL_ID_LENGTH = 1024;
 
 function quoteIdentifier(identifier: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(identifier)) {
@@ -215,6 +217,30 @@ export function createPostgresContentRepository(
 
   return {
     provider: "postgres",
+    async findExistingNewsIds(externalIds) {
+      if (!Array.isArray(externalIds)) {
+        throw new TypeError("findExistingNewsIds externalIds must be an array.");
+      }
+      const ids = [...new Set(externalIds.filter((id: unknown): id is string =>
+        typeof id === "string" && id.length <= MAX_EXTERNAL_ID_LENGTH &&
+        id.trim().length > 0 && !id.includes("\u0000")
+      ))];
+      if (ids.length === 0) return [];
+      const found = new Set<string>();
+      for (const batch of chunks(ids, NEWS_ID_LOOKUP_CHUNK_SIZE)) {
+        const result = await options.executor.query(
+          'SELECT "external_id" FROM "news_items" WHERE "external_id" = ANY($1::text[])',
+          [batch],
+        );
+        const requested = new Set(batch);
+        for (const row of result.rows) {
+          if (typeof row.external_id === "string" && requested.has(row.external_id)) {
+            found.add(row.external_id);
+          }
+        }
+      }
+      return ids.filter((id) => found.has(id));
+    },
     async upsertNewsItems(items) {
       const { valid, invalid } = validateNewsItems(items);
       const contract = getContentTableContract("news_items");

@@ -49,6 +49,8 @@ node scripts/bookmarks.mjs export --source '<Chrome Bookmarks 文件>'
 
 更多数据契约与迁移核对见 `ops/NEWS-MIGRATION.md`。生产环境值继承原采集程序的模型、翻译与通知设置，不使用示例值覆盖。
 
+文章收集按 [Horizon](https://github.com/Thysrael/Horizon) 的实际处理顺序接入：发布时间窗口、阅读 profile、AI 相关性和价值评分、同事件合并、来源／主题配额先于正文抓取和翻译；PostgreSQL 已有文章查询避免重复处理。保留历史归档、八层主题分类和原 08:00 调度。配置、边界和源码对照见 [HORIZON-ADOPTION](ops/HORIZON-ADOPTION.md)。
+
 ## 在线工具
 
 工具目录参考 [卡卡轻导航](https://kaka770.cn/tools) 的分类和功能选择；站内工具独立实现，未复制其代码、图像或品牌素材。`src/tools-catalogue.js` 管理参考目录与本地映射，`src/tools-core.js` 提供纯转换逻辑，`src/tools-media*.js` 处理本机文件，`src/tools-browser.js` 提供二维码、文档预览、便笺和时钟等浏览器交互。
