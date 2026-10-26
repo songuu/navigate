@@ -9,6 +9,18 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      calendar_postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: calendar-test-only
+          POSTGRES_DB: postgres
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,6 +28,12 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: PostgreSQL calendar integration
+        env:
+          CALENDAR_PG_CONTAINER: ${{ job.services.calendar_postgres.id }}
+        run: |
+          docker exec "$CALENDAR_PG_CONTAINER" psql -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE navigate_readonly; CREATE ROLE navigate_writer;"
+          bash ops/test-calendar-postgres.sh "$CALENDAR_PG_CONTAINER"
       - run: npm test
       - run: npm run backend:typecheck
       - run: npm run backend:test

@@ -83,6 +83,7 @@ if [[ ! -f "$base/shared/news-migrated" ]]; then
   echo 'Source/destination news row counts, date buckets and payload checksums match.'
 fi
 docker exec -i agent-build-postgres sh -c 'exec psql -U "$POSTGRES_USER" -d navigate -v ON_ERROR_STOP=1' < database/003-news-read-indexes.sql > "$backup/read-indexes.log"
+docker exec -i agent-build-postgres sh -c 'exec psql -U "$POSTGRES_USER" -d navigate -v ON_ERROR_STOP=1' < database/005-news-calendar-rollups.sql > "$backup/calendar-rollups.log"
 chown -R root:navigate "$base/shared"
 chmod 750 "$base/shared"
 chmod 640 "$base/shared/"*.env

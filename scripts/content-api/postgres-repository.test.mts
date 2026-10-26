@@ -47,32 +47,86 @@ test("PostgreSQL Content API uses positional parameters and native values", asyn
   assert.equal(page.hasMore, true);
 });
 
-test("PostgreSQL news calendar groups date and layer before data leaves the database", async () => {
+test("PostgreSQL news calendar reads only persistent rollups in one consistent query", async () => {
   const calls: Array<{ sql: string; values: readonly unknown[] }> = [];
   const repository = createPostgresContentReadRepository({
     async execute(sql, values) {
       calls.push({ sql, values });
-      if (sql.includes("to_char")) {
-        return [{ date: "2026-07-30", ecosystem_layer: "model-platform", article_count: 20 }];
-      }
-      if (sql.includes('GROUP BY "ecosystem_layer"')) {
-        return [{ ecosystem_layer: "model-platform", source_count: 3 }];
-      }
-      if (sql.includes('COUNT(DISTINCT "source_name")')) return [{ source_count: 8 }];
-      return [];
+      return [
+        { kind: "bucket", date: "2026-07-30", ecosystem_layer: "model-platform", article_count: "20", source_count: null },
+        { kind: "bucket", date: "2026-07-29", ecosystem_layer: "foundation", article_count: "2", source_count: null },
+        { kind: "source", date: null, ecosystem_layer: "all", article_count: null, source_count: "3" },
+        { kind: "source", date: null, ecosystem_layer: "foundation", article_count: null, source_count: "2" },
+        { kind: "source", date: null, ecosystem_layer: "model-platform", article_count: null, source_count: "3" },
+      ];
     },
   });
 
   assert.deepEqual(await repository.readNewsCalendar(), {
-    buckets: [{ date: "2026-07-30", ecosystemLayer: "model-platform", articleCount: 20 }],
+    buckets: [
+      { date: "2026-07-30", ecosystemLayer: "model-platform", articleCount: 20 },
+      { date: "2026-07-29", ecosystemLayer: "foundation", articleCount: 2 },
+    ],
     sourceCounts: [
-      { ecosystemLayer: "all", sourceCount: 8 },
+      { ecosystemLayer: "all", sourceCount: 3 },
+      { ecosystemLayer: "foundation", sourceCount: 2 },
       { ecosystemLayer: "model-platform", sourceCount: 3 },
     ],
   });
+  assert.equal(calls.length, 1, "calendar must not perform serial database reads");
+  assert.match(calls[0]?.sql ?? "", /FROM public\."news_calendar_buckets"/);
+  assert.match(calls[0]?.sql ?? "", /FROM public\."news_calendar_sources"/);
+  assert.doesNotMatch(calls[0]?.sql ?? "", /\bnews_items\b/);
   assert.match(calls[0]?.sql ?? "", /to_char\("collected_date", 'YYYY-MM-DD'\)/);
-  assert.match(calls[0]?.sql ?? "", /GROUP BY "collected_date", "ecosystem_layer"/);
+  assert.equal((calls[0]?.sql.match(/WHERE "article_count" > 0/g) ?? []).length, 3,
+    "retained zero counters must be excluded from all three projections");
+  assert.match(calls[0]?.sql ?? "", /COUNT\(DISTINCT "source_name"\)/,
+    "global sources must be deduplicated across layers");
+  assert.match(calls[0]?.sql ?? "", /ORDER BY "kind" ASC, "date" DESC NULLS LAST, "ecosystem_layer" ASC/);
   assert.deepEqual(calls[0]?.values, []);
+});
+
+test("PostgreSQL news calendar preserves the empty archive shape", async () => {
+  const repository = createPostgresContentReadRepository({
+    async execute() {
+      return [{ kind: "source", date: null, ecosystem_layer: "all", article_count: null, source_count: "0" }];
+    },
+  });
+  assert.deepEqual(await repository.readNewsCalendar(), {
+    buckets: [], sourceCounts: [{ ecosystemLayer: "all", sourceCount: 0 }],
+  });
+});
+
+test("PostgreSQL news calendar rejects malformed rollup data instead of serving an empty archive", async () => {
+  const all = { kind: "source", date: null, ecosystem_layer: "all", article_count: null, source_count: "0" };
+  const bucket = { kind: "bucket", date: "2026-07-30", ecosystem_layer: "foundation", article_count: "1", source_count: null };
+  const invalidRows = [
+    [],
+    [all, all],
+    [all, { ...bucket, kind: "unknown" }],
+    [all, { ...bucket, date: "2026-02-30" }],
+    [all, { ...bucket, date: new Date("2026-07-30T00:00:00Z") }],
+    [all, { ...bucket, ecosystem_layer: "" }],
+    ...[null, undefined, "", " ", true, -1, "-1", "1.5", "9007199254740992"].map(
+      (article_count) => [all, { ...bucket, article_count }],
+    ),
+    [{ ...all, source_count: null }],
+    [{ ...all, source_count: "NaN" }],
+  ];
+  for (const rows of invalidRows) {
+    const repository = createPostgresContentReadRepository({ async execute() { return rows; } });
+    await assert.rejects(repository.readNewsCalendar(), /PostgreSQL calendar/);
+  }
+});
+
+test("PostgreSQL news calendar propagates missing migrations without scanning article rows", async () => {
+  const failure = new Error('relation "public.news_calendar_buckets" does not exist');
+  let calls = 0;
+  const repository = createPostgresContentReadRepository({
+    async execute() { calls++; throw failure; },
+  });
+  await assert.rejects(repository.readNewsCalendar(), (error) => error === failure);
+  assert.equal(calls, 1, "a failed summary read must not fall back to a full archive aggregate");
 });
 
 test("news DATE projections stay textual while timestamps and date predicates remain native", async () => {

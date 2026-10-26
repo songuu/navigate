@@ -77,49 +77,51 @@ export function createPostgresContentReadRepository(
       };
     },
     async readNewsCalendar(): Promise<NewsCalendarSummary> {
-      const bucketRows = await executor.execute(
+      // Read both transactionally maintained rollups in one MVCC snapshot.
+      // A cache miss must never aggregate the much larger article archive.
+      const rows = await executor.execute(
         [
-          'SELECT to_char("collected_date", \'YYYY-MM-DD\') AS "date",',
-          '       "ecosystem_layer" AS "ecosystem_layer",',
-          '       COUNT(*)::int AS "article_count"',
-          'FROM "news_items"',
-          'GROUP BY "collected_date", "ecosystem_layer"',
-          'ORDER BY "collected_date" DESC, "ecosystem_layer" ASC',
-        ].join(" "),
-        [],
-      );
-      const layerSourceRows = await executor.execute(
-        [
-          'SELECT "ecosystem_layer" AS "ecosystem_layer",',
-          '       COUNT(DISTINCT "source_name")::int AS "source_count"',
-          'FROM "news_items"',
+          'SELECT \'bucket\'::text AS "kind", to_char("collected_date", \'YYYY-MM-DD\') AS "date",',
+          '       "ecosystem_layer", "article_count", NULL::bigint AS "source_count"',
+          'FROM public."news_calendar_buckets" WHERE "article_count" > 0',
+          'UNION ALL',
+          'SELECT \'source\'::text, NULL::text, "ecosystem_layer", NULL::bigint, COUNT(*)',
+          'FROM public."news_calendar_sources" WHERE "article_count" > 0',
           'GROUP BY "ecosystem_layer"',
-          'ORDER BY "ecosystem_layer" ASC',
+          'UNION ALL',
+          'SELECT \'source\'::text, NULL::text, \'all\'::text, NULL::bigint, COUNT(DISTINCT "source_name")',
+          'FROM public."news_calendar_sources" WHERE "article_count" > 0',
+          'ORDER BY "kind" ASC, "date" DESC NULLS LAST, "ecosystem_layer" ASC',
         ].join(" "),
         [],
       );
-      const allSourceRows = await executor.execute(
-        'SELECT COUNT(DISTINCT "source_name")::int AS "source_count" FROM "news_items"',
-        [],
-      );
+      const bucketRows: Record<string, unknown>[] = [];
+      const sourceRows: Record<string, unknown>[] = [];
+      for (const row of rows) {
+        if (row.kind === "bucket") bucketRows.push(row);
+        else if (row.kind === "source") sourceRows.push(row);
+        else throw new Error("PostgreSQL calendar row kind was invalid.");
+      }
+      const allSources = sourceRows.filter((row) => row.ecosystem_layer === "all");
+      if (allSources.length !== 1) throw new Error("PostgreSQL calendar global source total was invalid.");
       return {
         buckets: bucketRows.map(normalizeNewsCalendarBucket),
         sourceCounts: [
-          { ecosystemLayer: "all", sourceCount: aggregateCount(allSourceRows, "source_count") },
-          ...layerSourceRows.map(normalizeNewsCalendarSourceCount),
+          normalizeNewsCalendarSourceCount(allSources[0]!),
+          ...sourceRows.filter((row) => row.ecosystem_layer !== "all").map(normalizeNewsCalendarSourceCount),
         ],
       };
     },
   };
 }
 
-function aggregateCount(rows: readonly Record<string, unknown>[], field: string): number {
-  return numericField(rows[0], field);
-}
-
 function normalizeNewsCalendarBucket(row: Record<string, unknown>): NewsCalendarBucket {
   const date = stringField(row, "date");
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("PostgreSQL calendar bucket date was invalid.");
+  const parsedDate = new Date(`${date}T00:00:00.000Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(parsedDate.getTime())
+    || parsedDate.toISOString().slice(0, 10) !== date) {
+    throw new Error("PostgreSQL calendar bucket date was invalid.");
+  }
   return {
     date,
     ecosystemLayer: stringField(row, "ecosystem_layer"),
@@ -142,6 +144,9 @@ function stringField(row: Record<string, unknown> | undefined, field: string): s
 
 function numericField(row: Record<string, unknown> | undefined, field: string): number {
   const value = row?.[field];
+  if (typeof value !== "number" && (typeof value !== "string" || !/^\d+$/.test(value))) {
+    throw new Error(`PostgreSQL calendar ${field} was invalid.`);
+  }
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`PostgreSQL calendar ${field} was invalid.`);
   return parsed;
