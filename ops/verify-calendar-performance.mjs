@@ -1,19 +1,21 @@
 import assert from 'node:assert/strict';
 import {performance} from 'node:perf_hooks';
 import {NEWS_LAYERS, isNewsDate} from '../src/news-format.js';
+import {validateNewsCalendarSnapshot} from '../src/news-calendar.js';
 
 // Probe the first HTTP reads after readiness, and again after >5min idle.
 // Passive cache mode also needs a probe after its 60s TTL expires.
 // This probe reads public data only; it never flushes shared host/PG caches.
-const [baseArgument='http://127.0.0.1:5196', phase='cold-start', limitArgument='2500', totalArgument] = process.argv.slice(2);
+const [baseArgument='http://127.0.0.1:5196', phase='cold-start', limitArgument='2500', totalArgument, requestPath='/api/content/v1/news/calendar'] = process.argv.slice(2);
 const base = new URL(baseArgument);
 assert.ok(['http:', 'https:'].includes(base.protocol), 'Expected an HTTP(S) API base URL');
 assert.ok(!base.username && !base.password, 'API base URL must not contain credentials');
 const maxMs = Number(limitArgument);
-assert.ok(Number.isFinite(maxMs) && maxMs >= 100 && maxMs <= 60_000, 'Expected a 100–60000ms request limit');
+assert.ok(Number.isSafeInteger(maxMs) && maxMs >= 100 && maxMs <= 60_000, 'Expected an integer 100–60000ms request limit');
 const expectedTotal = totalArgument === undefined ? null : Number(totalArgument);
 assert.ok(expectedTotal === null || (Number.isSafeInteger(expectedTotal) && expectedTotal > 0), 'Expected a positive article total');
 const layers = new Set(NEWS_LAYERS.map(([key]) => key));
+assert.ok(['/api/content/v1/news/calendar','/data/news-calendar.json','/data/news-calendar-candidate.json'].includes(requestPath), 'Expected a calendar API or snapshot path');
 
 function validateCalendar(calendar) {
   assert.ok(calendar && Array.isArray(calendar.buckets) && calendar.buckets.length > 0, 'Calendar must contain archived articles');
@@ -44,17 +46,20 @@ function validateCalendar(calendar) {
 
 async function readCalendar() {
   const started = performance.now();
-  const response = await fetch(new URL('/api/content/v1/news/calendar', base), {
+  const response = await fetch(new URL(requestPath, base), {
     headers: {Host: 'songuu.top', 'Cache-Control': 'no-cache'},
     cache: 'no-store',
     signal: AbortSignal.timeout(maxMs),
   });
   assert.equal(response.status, 200, `${phase}: calendar HTTP status`);
   const calendar = await response.json();
+  if (requestPath.startsWith('/data/')) {
+    validateNewsCalendarSnapshot(calendar, {responseDate:response.headers.get('date'), elapsedMs:performance.now()-started});
+  }
   const total = validateCalendar(calendar);
   const elapsedMs = Math.round(performance.now() - started);
   assert.ok(elapsedMs <= maxMs, `${phase}: calendar took ${elapsedMs}ms, limit ${maxMs}ms`);
-  return {elapsedMs, total, calendar};
+  return {elapsedMs, total, calendar:{buckets:calendar.buckets,sourceCounts:calendar.sourceCounts}};
 }
 
 try {

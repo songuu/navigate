@@ -1,5 +1,7 @@
 import http from "node:http";
 
+import type { CalendarSnapshotPublisher } from "./calendar-snapshot.ts";
+
 import {
   ContentAssetRequestError,
   parseContentAssetRequest,
@@ -42,6 +44,8 @@ export interface ContentApiServerOptions {
   readonly newsCalendarRefreshIntervalMs?: number;
   /** Fail calendar reads and readiness once the last success reaches this age. */
   readonly newsCalendarMaxStaleMs?: number;
+  /** Optional atomic publisher for the same bounded-age public snapshot. */
+  readonly newsCalendarSnapshotPublisher?: CalendarSnapshotPublisher;
   /** Test seam for a manually advanced background refresh schedule. */
   readonly newsCalendarScheduleRefresh?: NewsCalendarCacheOptions["scheduleRefresh"];
   /** Test seam for deterministic calendar-cache expiry. */
@@ -86,6 +90,7 @@ function createContentApiServerContext(options: ContentApiServerOptions): { serv
     ttlMs: options.newsCalendarCacheTtlMs,
     refreshIntervalMs: options.newsCalendarRefreshIntervalMs,
     maxStaleMs: options.newsCalendarMaxStaleMs,
+    publishSnapshot: options.newsCalendarSnapshotPublisher,
     scheduleRefresh: options.newsCalendarScheduleRefresh,
     now: options.now,
     onError,
@@ -187,6 +192,7 @@ export interface NewsCalendarCacheOptions {
   readonly ttlMs?: number;
   readonly refreshIntervalMs?: number;
   readonly maxStaleMs?: number;
+  readonly publishSnapshot?: CalendarSnapshotPublisher;
   /** Returns a cleanup function; the default interval is unreferenced. */
   readonly scheduleRefresh?: (callback: () => void, intervalMs: number) => () => void;
   readonly now?: () => number;
@@ -242,11 +248,18 @@ export function createNewsCalendarCache(
     if (refreshing) return refreshing;
     const activeRefresh = Promise.resolve()
       .then(() => repository.readNewsCalendar())
-      .then((value) => {
+      .then(async (value) => {
         // Encode off the foreground path. Publish value, bytes and timestamp
         // together only after encoding succeeds, retaining the last good body
         // if either the database read or serialization fails.
         const snapshot = { value, bytes: Buffer.from(`${JSON.stringify(value)}\n`, "utf8"), loadedAt: now() };
+        // Publication is part of a successful generation, not a repackaging of
+        // the previous value. Failures retain the old file and success age.
+        await options.publishSnapshot?.({
+          bytes: snapshot.bytes,
+          generatedAtMs: snapshot.loadedAt,
+          expiresAtMs: snapshot.loadedAt + maxStaleMs,
+        });
         if (!closed) cached = snapshot;
         return snapshot;
       })

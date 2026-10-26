@@ -25,6 +25,10 @@
 
 刷新成功时还会预先编码 UTF-8 Buffer，与对象和成功时间一起原子发布。日历 HTTP 只检查快照年龄后直接发送该 Buffer，避免每次请求遍历 849 个日期桶或在并发访问时重复序列化。序列化失败保留旧快照，不发布半成品。
 
+共享主机在长空闲后仍会换出 Node 的 HTTP 代码页，预编码候选未通过 2.5 秒首访门槛，因此网页最终改为读取 Nginx 静态公开数据 `/data/news-calendar.json`。30 秒刷新成功后，在独立 `StateDirectory` 原子发布同代统计和 `snapshotGeneratedAt` / `snapshotExpiresAt`，文件仅含公开计数，0644、目录 0755。临时文件写入、同步、关闭后才 rename，失败保留旧代。
+
+浏览器使用响应 `Date` 加请求耗时校验快照时间顺序、最长 120 秒跨度和有效期，不依赖本机时钟；缺失、损坏或过期均明确报错，不回退慢 API。恢复可见时重拉。只有本地 Vite 开发的 404 才使用兼容 API。文件可跨进程重启保留；即使 Node 挂死无法删除旧文件，消费者也不会将它当作未过期日历。原 `/api/content/v1/news/calendar` 和 legacy API 的 Host、Origin、方法、参数及健康检查语义仍保留。
+
 ## 迁移与权限
 
 首次迁移在一个事务中取得 `news_items` 的 `SHARE ROW EXCLUSIVE` 锁，阻止并发写入，允许普通读取；随后回填历史计数、安装触发器和授权，一起提交，避免回填与新写入之间出现间隙。
@@ -58,24 +62,24 @@ bash ops/test-calendar-postgres.sh agent-build-postgres full
 性能探针只读公共接口，发送 5 个并发请求，核对结构、计数、并发结果一致性和每个请求耗时：
 
 ```sh
-node ops/verify-calendar-performance.mjs http://127.0.0.1:5196 cold-start 2500 21003
-node ops/verify-calendar-performance.mjs http://127.0.0.1:5196 cache-expired 2500 21003
+node ops/verify-calendar-performance.mjs https://songuu.top static-first 4000 21003 /data/news-calendar.json
+node ops/verify-calendar-performance.mjs https://songuu.top static-idle-over5min 4000 21003 /data/news-calendar.json
 ```
 
 最后一个参数须换成独立核对的当前文章总量。`phase` 只是报告标签，不会自动制造冷缓存：第一轮须在 API 重启、就绪检查完成后作为首批日历 HTTP 请求运行，不做 HTTP 预热。主动模式已在监听前完成初始化；还须无访问等待超过 5 分钟，确认持续后台刷新时首访仍快。默认请求时刷新模式另需验证 60 秒 TTL 过期。不要清空共享主机或 PostgreSQL 的系统缓存。公网和真实浏览器还需验证首次打开、分类／日期切换、加载更多、详情及返回列表。
 
 ## 发布与回退
 
-窄发布入口为 `ops/publish-calendar.sh`，已通过数据库、通用代码和 TypeScript 审查：先执行迁移并只读核对原表与汇总一致，再替换 API 读取源码并仅重启 `navigate-content-api.service`，首个日历请求通过性能门槛后完成发布。无需更改前端资源、采集定时器、Nginx 或其他应用。
+窄发布入口为 `ops/publish-calendar.sh`：先执行迁移并只读核对原表与汇总一致，再安装本 API 的 StateDirectory 配置、重启并生成有效快照；增加 Nginx 的精确静态资产位置，通过原生 HTTP 性能与元数据校验后，最后原子切换新前端。备份包括实际 unit、导航专用 Nginx 片段及旧 index；不更改其他应用和采集定时器。
 
-发布失败应恢复备份的源码并重启本 API。新增汇总属于附加数据库对象，保留以供核查；回退的旧 API 仍可读取原始文章。不得为回退删除新闻、改动其他应用或反复清缓存制造快读结果。
+发布失败恢复源码、实际 unit、导航片段及旧 index，并重启本 API、重新载入已校验的导航配置。新增汇总和新的带哈希资产属于附加对象，保留以供核查；旧 index 仍能访问原有资产。不得为回退删除新闻、改动其他应用或反复清缓存制造快读结果。
 
 ## 验收记录
 
 | 项目 | 2026-10-26 状态 |
 | --- | --- |
-| 前端回归 | 已通过，80 项 |
-| 后端回归 | 已通过，228 项（含 TCP 握手超时及每代快照只编码一次的真实 HTTP 测试） |
+| 前端回归 | 已通过，92 项（含静态快照的新鲜度和禁生产回退测试） |
+| 后端回归 | 已通过，237 项（含原子文件发布、TCP 超时及每代只编码一次） |
 | 类型检查、采集冒烟、构建 | 已通过 |
 | 隔离 PostgreSQL 完整行为测试 | 已通过：修复前 RED、修复后全部行为、两会话并发、5 秒锁超时回滚及重复迁移；临时库已清理 |
 | 首轮发布速度门槛 | 未通过 2.5 秒，自动恢复旧 API；005 和生产一致性核对通过并保留 |

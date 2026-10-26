@@ -502,6 +502,94 @@ test("calendar serialization failure cannot replace the last complete snapshot o
   cache.close();
 });
 
+test("calendar publication gates readiness and uses the same success time and maximum age", async () => {
+  let now = 10_000;
+  let release: (() => void) | undefined;
+  let publicationStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolveStarted) => { publicationStarted = resolveStarted; });
+  const pending = new Promise<void>((resolvePending) => { release = resolvePending; });
+  const timer = manualCalendarRefresh();
+  const value = { buckets: [], sourceCounts: [{ ecosystemLayer: "all", sourceCount: 0 }] };
+  const cache = createNewsCalendarCache({ async readNewsCalendar() { return value; } }, {
+    now: () => now, refreshIntervalMs: 30_000, maxStaleMs: 120_000, scheduleRefresh: timer.schedule,
+    async publishSnapshot(publication) {
+      assert.equal(publication.generatedAtMs, 10_000);
+      assert.equal(publication.expiresAtMs, 130_000);
+      assert.deepEqual(JSON.parse(Buffer.from(publication.bytes).toString("utf8")), value);
+      publicationStarted?.();
+      await pending;
+    },
+  });
+  let primed = false;
+  const priming = cache.prime().then(() => { primed = true; });
+  try {
+    await Promise.race([started, priming.then(() => { throw new Error("prime completed before publishing its asset"); })]);
+    assert.equal(primed, false);
+    assert.equal(cache.isReady(), false);
+    assert.equal(timer.size, 0);
+    release?.();
+    await priming;
+    assert.equal(cache.isReady(), true);
+    assert.strictEqual(await cache.read(), value);
+    now = 130_000;
+    assert.equal(cache.isReady(), false);
+  } finally { release?.(); await priming; cache.close(); }
+});
+
+test("publication failure cannot renew an old snapshot and startup refuses a failed first publication", async () => {
+  let now = 0;
+  let publishFails = false;
+  let count = 1;
+  const timer = manualCalendarRefresh();
+  const errors: unknown[] = [];
+  const cache = createNewsCalendarCache({ async readNewsCalendar() {
+    return { buckets: [{ date: "2026-10-26", ecosystemLayer: "runtime", articleCount: count }], sourceCounts: [] };
+  } }, {
+    now: () => now, refreshIntervalMs: 30_000, maxStaleMs: 120_000, scheduleRefresh: timer.schedule,
+    async publishSnapshot() { if (publishFails) throw new Error("asset publication failed"); },
+    onError: (error) => errors.push(error),
+  });
+  await cache.prime();
+  publishFails = true;
+  count = 2;
+  now = 30_000;
+  timer.tick(); await flushRefresh();
+  assert.equal((await cache.read()).buckets[0]?.articleCount, 1);
+  assert.equal(errors.length, 1);
+  now = 120_000;
+  assert.equal(cache.isReady(), false);
+  await assert.rejects(cache.read(), /snapshot.*unavailable/i);
+  cache.close();
+
+  await assert.rejects(startContentApiServer({
+    repository: successfulRepository, host: "127.0.0.1", port: 0,
+    newsCalendarRefreshIntervalMs: 30_000,
+    async newsCalendarSnapshotPublisher() { throw new Error("initial asset publication failed"); },
+  }), /initial asset publication failed/);
+});
+
+test("closing during a publication stops scheduling while allowing only its complete snapshot publication", async () => {
+  let release: (() => void) | undefined;
+  let markPublishing: (() => void) | undefined;
+  const started = new Promise<void>((resolveStarted) => { markPublishing = resolveStarted; });
+  const pending = new Promise<void>((resolvePending) => { release = resolvePending; });
+  const timer = manualCalendarRefresh();
+  const cache = createNewsCalendarCache(successfulRepository, {
+    refreshIntervalMs: 30_000, scheduleRefresh: timer.schedule,
+    async publishSnapshot() { markPublishing?.(); await pending; },
+  });
+  const priming = cache.prime();
+  try {
+    await Promise.race([started, priming.then(() => { throw new Error("publication was not awaited"); })]);
+    cache.close();
+    release?.();
+    await priming;
+    assert.equal(timer.size, 0);
+    assert.equal(cache.isReady(), false);
+    await assert.rejects(cache.read(), /closed/);
+  } finally { release?.(); await priming; cache.close(); }
+});
+
 test("news response cache bounds retained query keys", async () => {
   let calls = 0;
   const cache = createNewsResponseCache(

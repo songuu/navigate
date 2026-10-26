@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { ContentReadRepository } from "./contract.ts";
+import { createCalendarSnapshotPublisher } from "./calendar-snapshot.ts";
 import { loadContentBackendConfig, openContentReadRepository, type ContentRepositoryHandle } from "./repository.ts";
 import { DEFAULT_CONTENT_API_PORT, startContentApiServer } from "./server.ts";
 
@@ -31,7 +32,7 @@ if (enabled) {
 const port = readIntegerEnv("CONTENT_API_PORT", DEFAULT_CONTENT_API_PORT);
 const allowedHosts = readListEnv("CONTENT_API_ALLOWED_HOSTS", ["songuu.top"]);
 const allowedOrigins = readListEnv("CONTENT_API_ALLOWED_ORIGINS", ["https://songuu.top"]);
-const server = await startContentApiServer({
+const server = await Promise.resolve().then(() => startContentApiServer({
   repository,
   assetRepository: repositoryHandle?.assetRepository,
   host: process.env.CONTENT_API_HOST?.trim() || "0.0.0.0",
@@ -41,11 +42,13 @@ const server = await startContentApiServer({
   allowMissingOrigin: readBooleanEnv("CONTENT_API_ALLOW_MISSING_ORIGIN", true),
   newsCalendarRefreshIntervalMs: enabled ? readIntegerEnv("CONTENT_API_CALENDAR_REFRESH_INTERVAL_MS", 30_000) : undefined,
   newsCalendarMaxStaleMs: readIntegerEnv("CONTENT_API_CALENDAR_MAX_STALE_MS", 120_000),
+  newsCalendarSnapshotPublisher: process.env.CONTENT_API_CALENDAR_SNAPSHOT_FILE?.trim()
+    ? createCalendarSnapshotPublisher(process.env.CONTENT_API_CALENDAR_SNAPSHOT_FILE.trim()) : undefined,
   onError: (error) => {
     const detail = error instanceof Error ? error.message : String(error);
     console.error(`content API read failed: ${detail.slice(0, 500)}`);
   },
-}).catch(async (error: unknown) => {
+})).catch(async (error: unknown) => {
   // A failed prime must release its database pool instead of leaving a
   // non-listening process alive with resources held between service restarts.
   try {

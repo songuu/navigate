@@ -1,5 +1,6 @@
 import './news.css';
 import { NEWS_LAYERS, buildNewsQuery, isNewsDate, normalizeArticle, calendarDates, articleParagraphs, filterLoadedNews, findNewsNeighbors, calendarSelectionForLayer } from './news-format.js';
+import { readNewsCalendar } from './news-calendar.js';
 
 const mounted = new WeakMap();
 const PAGE_SIZE = 20;
@@ -33,8 +34,9 @@ function articleLink(article, context = {}) {
   return `/news/?${params}`;
 }
 
-async function requestJson(url, lifetimeSignal) {
+async function requestJson(url, lifetimeSignal, {withResponse = false, allowNotFound = false} = {}) {
   const controller = new AbortController();
+  const startedAt = performance.now();
   let timedOut = false;
   const abort = () => controller.abort();
   if (lifetimeSignal.aborted) abort();
@@ -44,8 +46,10 @@ async function requestJson(url, lifetimeSignal) {
   const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 30000);
   try {
     const response = await fetch(url, {signal: controller.signal, cache: 'no-store', headers: {Accept: 'application/json'}});
+    if (response.status === 404 && allowNotFound) return {status: response.status};
     if (!response.ok) throw new Error(`资讯服务暂不可用（HTTP ${response.status}）`);
-    return await response.json();
+    const payload = await response.json();
+    return withResponse ? {status: response.status, payload, responseDate: response.headers.get('Date'), elapsedMs: performance.now() - startedAt} : payload;
   } catch (error) {
     if (lifetimeSignal.aborted) throw error;
     if (timedOut) throw new Error('资讯读取超时，请重试');
@@ -114,6 +118,7 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   let calendar = {buckets: [], sourceCounts: []};
   let calendarLoaded = false;
   let calendarError = '';
+  let calendarGeneration = 0;
   let month = (state.date || new Intl.DateTimeFormat('en-CA', {timeZone: 'Asia/Shanghai', year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date())).slice(0, 7);
   let query = '';
   let listScroll = 0;
@@ -250,18 +255,19 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
   }
 
   async function loadCalendar() {
+    const current = ++calendarGeneration;
     calendarError='';
     try {
-      const payload = await requestJson(`${apiBase}/news/calendar`, lifetime.signal);
-      if (lifetime.signal.aborted) return;
-      if (!Array.isArray(payload.buckets) || !Array.isArray(payload.sourceCounts)) throw new Error('资讯日历暂不可用');
+      const payload = await readNewsCalendar({readJson:requestJson,apiBase,signal:lifetime.signal,isDevelopment:import.meta.env?.DEV === true,hostname:window.location.hostname});
+      if (current !== calendarGeneration || lifetime.signal.aborted) return;
       calendar=payload; calendarLoaded=true;
       const dates=calendarDates(calendar.buckets,state.layer);
       if (!state.explicitDate && !state.id && !state.date && dates[0]) {
         state.date=dates[0]; month=state.date.slice(0,7); replaceUrl(); void loadList();
       }
     } catch (error) {
-      if (lifetime.signal.aborted) return;
+      if (current !== calendarGeneration || lifetime.signal.aborted) return;
+      calendar={buckets:[],sourceCounts:[]}; calendarLoaded=false;
       calendarError=error.message;
     }
     renderSidebar();
@@ -359,8 +365,10 @@ export async function mountNews(container, {apiBase = '/api/content/v1'} = {}) {
       window.scrollTo({top:listScroll,behavior:'instant'});
     } else void loadList();
   };
+  const onVisibilityChange=()=> {if(document.visibilityState === 'visible') void loadCalendar();};
   window.addEventListener('popstate',onPopState);
-  const dispose=()=> {lifetime.abort();generation++;window.removeEventListener('popstate',onPopState);mounted.delete(container);};
+  document.addEventListener('visibilitychange',onVisibilityChange);
+  const dispose=()=> {lifetime.abort();generation++;calendarGeneration++;window.removeEventListener('popstate',onPopState);document.removeEventListener('visibilitychange',onVisibilityChange);mounted.delete(container);};
   mounted.set(container,dispose);
   renderSidebar();
   if(state.id)void loadDetail();else void loadList();

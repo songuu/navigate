@@ -11,7 +11,10 @@ WorkingDirectory=/opt/navigate/current
 Environment=NODE_ENV=production
 Environment=CONTENT_API_ENABLED=1
 Environment=CONTENT_API_HOST=127.0.0.1
+Environment=CONTENT_API_CALENDAR_SNAPSHOT_FILE=/var/lib/navigate-content-api/calendar.json
 EnvironmentFile=/opt/navigate/shared/content-api.env
+StateDirectory=navigate-content-api
+StateDirectoryMode=0755
 ExecStart=/usr/bin/node --experimental-transform-types scripts/content-api/start-production.ts
 Restart=on-failure
 RestartSec=5s
