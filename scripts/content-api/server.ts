@@ -34,10 +34,16 @@ export interface ContentApiServerOptions {
   readonly allowMissingOrigin?: boolean;
   /**
    * The calendar is an unparameterized public aggregate. Keep one fresh copy
-   * in-process so concurrent browser loads do not all repeat the same three
-   * database aggregates while the host is under pressure.
+   * in-process so concurrent browser loads do not all repeat the same database
+   * read while the host is under pressure.
    */
   readonly newsCalendarCacheTtlMs?: number;
+  /** Prime before readiness and refresh independently of visitors when set. */
+  readonly newsCalendarRefreshIntervalMs?: number;
+  /** Fail calendar reads and readiness once the last success reaches this age. */
+  readonly newsCalendarMaxStaleMs?: number;
+  /** Test seam for a manually advanced background refresh schedule. */
+  readonly newsCalendarScheduleRefresh?: NewsCalendarCacheOptions["scheduleRefresh"];
   /** Test seam for deterministic calendar-cache expiry. */
   readonly now?: () => number;
   /** Cache only validated public news-list responses for a short server-side TTL. */
@@ -62,12 +68,25 @@ interface GateFailure {
  * execution routes and accepts only the constrained request parsed in contract.ts.
  */
 export function createContentApiServer(options: ContentApiServerOptions): http.Server {
+  const context = createContentApiServerContext(options);
+  if (options.newsCalendarRefreshIntervalMs !== undefined) {
+    // The synchronous factory can be used before readiness; the async start
+    // function below is the production entry point that gates listening.
+    void context.calendar.prime().catch(() => undefined);
+  }
+  return context.server;
+}
+
+function createContentApiServerContext(options: ContentApiServerOptions): { server: http.Server; calendar: NewsCalendarCache } {
   const allowedHosts = new Set(options.allowedHosts ?? DEFAULT_CONTENT_API_ALLOWED_HOSTS);
   const allowedOrigins = new Set(options.allowedOrigins ?? DEFAULT_CONTENT_API_ALLOWED_ORIGINS);
   const allowMissingOrigin = options.allowMissingOrigin ?? false;
   const onError = options.onError ?? (() => undefined);
   const newsCalendarCache = createNewsCalendarCache(options.repository, {
     ttlMs: options.newsCalendarCacheTtlMs,
+    refreshIntervalMs: options.newsCalendarRefreshIntervalMs,
+    maxStaleMs: options.newsCalendarMaxStaleMs,
+    scheduleRefresh: options.newsCalendarScheduleRefresh,
     now: options.now,
     onError,
   });
@@ -78,11 +97,15 @@ export function createContentApiServer(options: ContentApiServerOptions): http.S
     onError,
   });
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const requestUrl = parseRequestUrl(req);
     if (requestUrl.pathname === "/healthz") {
       if (!allowHealthRequest(req, res, allowedHosts)) return;
-      sendJson(res, 200, { ok: true });
+      if (!newsCalendarCache.isReady()) {
+        sendJson(res, 503, { ok: false, error: "calendar_snapshot_unavailable" });
+      } else {
+        sendJson(res, 200, { ok: true });
+      }
       return;
     }
 
@@ -157,10 +180,16 @@ export function createContentApiServer(options: ContentApiServerOptions): http.S
       sendJson(res, 503, { ok: false, error: "content_backend_unavailable" });
     }
   });
+  server.once("close", () => newsCalendarCache.close());
+  return { server, calendar: newsCalendarCache };
 }
 
 export interface NewsCalendarCacheOptions {
   readonly ttlMs?: number;
+  readonly refreshIntervalMs?: number;
+  readonly maxStaleMs?: number;
+  /** Returns a cleanup function; the default interval is unreferenced. */
+  readonly scheduleRefresh?: (callback: () => void, intervalMs: number) => () => void;
   readonly now?: () => number;
   readonly onError?: (error: unknown) => void;
 }
@@ -171,31 +200,56 @@ interface CachedNewsCalendar {
 }
 
 const DEFAULT_NEWS_CACHE_TTL_MS = 60_000;
+const MAX_CALENDAR_REFRESH_INTERVAL_MS = 30_000;
+const DEFAULT_CALENDAR_MAX_STALE_MS = 120_000;
+
+interface NewsCalendarCache {
+  read(): Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>>;
+  prime(): Promise<void>;
+  isReady(): boolean;
+  close(): void;
+}
 
 /**
- * Expired callers wait for one shared refresh so the first visitor after a
- * collection sees its new aggregate. The previous success is only a fallback
- * when that refresh fails; its timestamp stays expired so the next read retries.
+ * Passive mode preserves refresh-on-read semantics. Active mode primes once,
+ * refreshes without visitors and serves only a bounded-age memory snapshot, so
+ * neither quiet periods nor a cold database connection delay foreground reads.
  */
 export function createNewsCalendarCache(
   repository: Pick<ContentReadRepository, "readNewsCalendar">,
   options: NewsCalendarCacheOptions = {},
-): { read(): Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>> } {
+): NewsCalendarCache {
   const ttlMs = normalizeCalendarCacheTtl(options.ttlMs);
+  const refreshIntervalMs = options.refreshIntervalMs === undefined
+    ? undefined : boundedCalendarInterval(options.refreshIntervalMs);
+  const maxStaleMs = options.maxStaleMs ?? DEFAULT_CALENDAR_MAX_STALE_MS;
+  if (refreshIntervalMs !== undefined && (!Number.isSafeInteger(maxStaleMs) || maxStaleMs < refreshIntervalMs)) {
+    throw new Error("Calendar maximum snapshot age must be an integer at least as long as its refresh interval.");
+  }
   const now = options.now ?? Date.now;
   const onError = options.onError ?? (() => undefined);
+  const scheduleRefresh = options.scheduleRefresh ?? scheduleCalendarRefresh;
   let cached: CachedNewsCalendar | null = null;
   let refreshing: Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>> | null = null;
+  let stopRefresh: (() => void) | null = null;
+  let closed = false;
+
+  const isReady = (): boolean => refreshIntervalMs === undefined
+    || (!closed && cached !== null && now() - cached.loadedAt < maxStaleMs);
 
   const refresh = (): Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>> => {
     if (refreshing) return refreshing;
     const activeRefresh = Promise.resolve()
       .then(() => repository.readNewsCalendar())
       .then((value) => {
-        cached = { value, loadedAt: now() };
+        if (!closed) cached = { value, loadedAt: now() };
         return value;
       })
       .catch((error: unknown) => {
+        if (refreshIntervalMs !== undefined) {
+          onError(error);
+          throw error;
+        }
         if (!cached) throw error;
         onError(error);
         return cached.value;
@@ -209,10 +263,41 @@ export function createNewsCalendarCache(
 
   return {
     async read() {
+      if (closed) throw new Error("Calendar cache is closed.");
+      if (refreshIntervalMs !== undefined) {
+        if (!isReady() || !cached) throw new Error("Calendar snapshot is unavailable or too old.");
+        return cached.value;
+      }
       if (cached && now() - cached.loadedAt < ttlMs) return cached.value;
       return refresh();
     },
+    async prime() {
+      if (closed) throw new Error("Calendar cache is closed.");
+      await refresh();
+      if (!closed && refreshIntervalMs !== undefined && !stopRefresh) {
+        stopRefresh = scheduleRefresh(() => {
+          if (!closed) void refresh().catch(() => undefined);
+        }, refreshIntervalMs);
+      }
+    },
+    isReady,
+    close() {
+      closed = true;
+      stopRefresh?.();
+      stopRefresh = null;
+    },
   };
+}
+
+function boundedCalendarInterval(value: number): number {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Calendar refresh interval must be a positive integer.");
+  return Math.min(value, MAX_CALENDAR_REFRESH_INTERVAL_MS);
+}
+
+function scheduleCalendarRefresh(callback: () => void, intervalMs: number): () => void {
+  const timer = setInterval(callback, intervalMs);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 function normalizeCalendarCacheTtl(value: number | undefined): number {
@@ -328,15 +413,22 @@ function normalizeNewsResponseCacheMaxEntries(value: number | undefined): number
 export async function startContentApiServer(options: StartContentApiServerOptions): Promise<http.Server> {
   const host = options.host ?? DEFAULT_CONTENT_API_HOST;
   const port = options.port ?? DEFAULT_CONTENT_API_PORT;
-  const server = createContentApiServer(options);
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen(port, host, () => {
-      server.off("error", rejectListen);
-      resolveListen();
+  const { server, calendar } = createContentApiServerContext(options);
+  try {
+    if (options.newsCalendarRefreshIntervalMs !== undefined) await calendar.prime();
+    await new Promise<void>((resolveListen, rejectListen) => {
+      server.once("error", rejectListen);
+      server.listen(port, host, () => {
+        server.off("error", rejectListen);
+        resolveListen();
+      });
     });
-  });
-  return server;
+    return server;
+  } catch (error) {
+    calendar.close();
+    server.close(() => undefined);
+    throw error;
+  }
 }
 
 function allowHealthRequest(

@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {performance} from 'node:perf_hooks';
 import {NEWS_LAYERS, isNewsDate} from '../src/news-format.js';
 
-// Run immediately after an API restart, and again after its 60s cache expires.
+// Probe the first HTTP reads after readiness, and again after >5min idle.
+// Passive cache mode also needs a probe after its 60s TTL expires.
 // This probe reads public data only; it never flushes shared host/PG caches.
 const [baseArgument='http://127.0.0.1:5196', phase='cold-start', limitArgument='2500', totalArgument] = process.argv.slice(2);
 const base = new URL(baseArgument);

@@ -198,6 +198,9 @@ interface PgModule {
     readonly ssl?: { readonly rejectUnauthorized: true };
     readonly max: number;
     readonly idleTimeoutMillis: number;
+    readonly connectionTimeoutMillis: number;
+    readonly statement_timeout: number;
+    readonly query_timeout: number;
     readonly application_name: string;
   }) => PgPool;
 }
@@ -225,6 +228,11 @@ export async function openPgExecutor(
     ssl: config.ssl ? { rejectUnauthorized: true } : undefined,
     max: 5,
     idleTimeoutMillis: CONTENT_API_PG_IDLE_TIMEOUT_MS,
+    // Keep failed refreshes bounded so a broken connection cannot occupy the
+    // single-flight slot forever. Client timeout also covers lost responses.
+    connectionTimeoutMillis: 5_000,
+    statement_timeout: 10_000,
+    query_timeout: 12_000,
     application_name: "navigate-content-api",
   });
   return {

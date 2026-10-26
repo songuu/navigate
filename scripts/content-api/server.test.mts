@@ -3,7 +3,7 @@ import http from "node:http";
 import test from "node:test";
 
 import type { ContentPage, ContentReadRepository, ContentReadRequest } from "./contract.ts";
-import { createContentApiServer, createNewsCalendarCache, createNewsResponseCache } from "./server.ts";
+import { createContentApiServer, createNewsCalendarCache, createNewsResponseCache, startContentApiServer } from "./server.ts";
 
 const allowedHosts = ["content.test"];
 const allowedOrigins = ["https://site.test"];
@@ -254,6 +254,160 @@ test("calendar refresh failure shares the last success without caching the error
   assert.deepEqual(await cache.read(), newSummary);
   assert.deepEqual(await cache.read(), newSummary);
   assert.equal(calls, 3);
+});
+
+function manualCalendarRefresh() {
+  const callbacks = new Set<() => void>();
+  return {
+    schedule(callback: () => void, intervalMs: number) {
+      assert.ok(intervalMs > 0 && intervalMs <= 30_000);
+      callbacks.add(callback);
+      return () => { callbacks.delete(callback); };
+    },
+    tick() { for (const callback of callbacks) callback(); },
+    get size() { return callbacks.size; },
+  };
+}
+
+const flushRefresh = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("proactive calendar primes once then serves memory while background refreshes are single flight", async () => {
+  let now = 0;
+  let calls = 0;
+  let releaseRefresh: ((value: Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>) => void) | undefined;
+  const initial = { buckets: [{ date: "2026-10-26", ecosystemLayer: "runtime", articleCount: 1 }], sourceCounts: [] };
+  const updated = { ...initial, buckets: [{ ...initial.buckets[0]!, articleCount: 2 }] };
+  const pendingRefresh = new Promise<typeof updated>((resolve) => { releaseRefresh = resolve; });
+  const timer = manualCalendarRefresh();
+  const cache = createNewsCalendarCache({
+    async readNewsCalendar() { calls++; return calls === 1 ? initial : pendingRefresh; },
+  }, {
+    ttlMs: 1, now: () => now, refreshIntervalMs: 30_000, maxStaleMs: 120_000,
+    scheduleRefresh: timer.schedule,
+  });
+  assert.equal(cache.isReady(), false);
+  await assert.rejects(cache.read(), /snapshot.*unavailable/i);
+  assert.equal(calls, 0, "foreground must not start a cold database read");
+  await Promise.all([cache.prime(), cache.prime()]);
+  assert.equal(calls, 1);
+  assert.equal(timer.size, 1);
+  assert.equal(cache.isReady(), true);
+
+  now = 30_000;
+  timer.tick(); timer.tick();
+  await flushRefresh();
+  assert.equal(calls, 2, "timer ticks must share the ongoing database read");
+  assert.deepEqual(await cache.read(), initial, "a foreground read must not await the background query");
+  releaseRefresh?.(updated);
+  await flushRefresh();
+  assert.deepEqual(await cache.read(), updated, "successful refresh is visible without a second TTL");
+  assert.equal(calls, 2);
+  cache.close();
+  assert.equal(timer.size, 0);
+  timer.tick();
+  await flushRefresh();
+  assert.equal(calls, 2);
+});
+
+test("proactive calendar failures do not extend freshness and later background success recovers", async () => {
+  let now = 0;
+  let failed = false;
+  const errors: unknown[] = [];
+  const timer = manualCalendarRefresh();
+  const summary = { buckets: [], sourceCounts: [{ ecosystemLayer: "all", sourceCount: 0 }] };
+  const cache = createNewsCalendarCache({
+    async readNewsCalendar() { if (failed) throw new Error("calendar database offline"); return summary; },
+  }, { now: () => now, refreshIntervalMs: 30_000, maxStaleMs: 120_000, scheduleRefresh: timer.schedule, onError: (error) => errors.push(error) });
+  await cache.prime();
+  failed = true;
+  now = 30_000;
+  timer.tick(); await flushRefresh();
+  assert.deepEqual(await cache.read(), summary);
+  assert.equal(errors.length, 1);
+  now = 120_000;
+  timer.tick(); await flushRefresh();
+  assert.equal(cache.isReady(), false);
+  await assert.rejects(cache.read(), /snapshot.*unavailable/i);
+  failed = false;
+  timer.tick(); await flushRefresh();
+  assert.equal(cache.isReady(), true);
+  assert.deepEqual(await cache.read(), summary);
+  cache.close();
+});
+
+test("active server waits for successful calendar prime before listening and closes its refresh timer", async () => {
+  const timer = manualCalendarRefresh();
+  let releasePrime: ((value: Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>) => void) | undefined;
+  let primeStarted = false;
+  const prime = new Promise<Awaited<ReturnType<ContentReadRepository["readNewsCalendar"]>>>((resolve) => { releasePrime = resolve; });
+  const reservation = http.createServer();
+  await listen(reservation);
+  const reserved = reservation.address();
+  assert.ok(reserved && typeof reserved === "object");
+  const port = reserved.port;
+  await close(reservation);
+  const starting = startContentApiServer({
+    repository: { ...successfulRepository, async readNewsCalendar() { primeStarted = true; return prime; } },
+    host: "127.0.0.1", port, allowedHosts, allowedOrigins,
+    newsCalendarRefreshIntervalMs: 30_000,
+    newsCalendarScheduleRefresh: timer.schedule,
+  });
+  try {
+    await flushRefresh();
+    assert.equal(primeStarted, true, "startup must request its snapshot before listening");
+    await assert.rejects(request(port, "/healthz"), /ECONNREFUSED/);
+    releasePrime?.(await successfulRepository.readNewsCalendar());
+    await starting;
+    assert.equal((await request(port, "/healthz")).status, 200);
+    assert.equal((await request(port, "/api/content/v1/news/calendar")).status, 200);
+    assert.equal(timer.size, 1);
+  } finally {
+    releasePrime?.(await successfulRepository.readNewsCalendar());
+    const server = await starting;
+    if (server.listening) await close(server);
+  }
+  assert.equal(timer.size, 0);
+});
+
+test("active server refuses startup when calendar prime fails", async () => {
+  const timer = manualCalendarRefresh();
+  await assert.rejects(startContentApiServer({
+    repository: { ...successfulRepository, async readNewsCalendar() { throw new Error("missing calendar migration"); } },
+    host: "127.0.0.1", port: 0, allowedHosts, allowedOrigins,
+    newsCalendarRefreshIntervalMs: 30_000,
+    newsCalendarScheduleRefresh: timer.schedule,
+  }), /missing calendar migration/);
+  assert.equal(timer.size, 0);
+});
+
+test("active health and calendar fail promptly on an aged snapshot then recover on background refresh", async () => {
+  let now = 0;
+  let failed = false;
+  let calls = 0;
+  const timer = manualCalendarRefresh();
+  const server = await startContentApiServer({
+    repository: { ...successfulRepository, async readNewsCalendar() { calls++; if (failed) throw new Error("offline"); return successfulRepository.readNewsCalendar(); } },
+    host: "127.0.0.1", port: 0, allowedHosts, allowedOrigins, now: () => now,
+    newsCalendarRefreshIntervalMs: 30_000,
+    newsCalendarMaxStaleMs: 120_000,
+    newsCalendarScheduleRefresh: timer.schedule,
+  });
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    now = 120_000;
+    failed = true;
+    timer.tick(); await flushRefresh();
+    const before = calls;
+    assert.equal((await request(address.port, "/healthz")).status, 503);
+    assert.equal((await request(address.port, "/api/content/v1/news/calendar")).status, 503);
+    assert.equal(calls, before, "health and foreground reads must not query the database");
+    failed = false;
+    timer.tick(); await flushRefresh();
+    assert.equal((await request(address.port, "/healthz")).status, 200);
+    assert.equal((await request(address.port, "/api/content/v1/news/calendar")).status, 200);
+  } finally { await close(server); }
+  assert.equal(timer.size, 0);
 });
 
 test("news response cache bounds retained query keys", async () => {

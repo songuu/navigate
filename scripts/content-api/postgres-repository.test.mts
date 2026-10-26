@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import net from "node:net";
 
 import type { ContentReadRequest } from "./contract.ts";
 import {
   createPostgresContentReadRepository,
+  openPgExecutor,
   type PostgresQueryExecutor,
 } from "./postgres-repository.ts";
 import {
@@ -20,6 +22,31 @@ const request: ContentReadRequest = {
   offset: 4,
   includeTotal: true,
 };
+
+test("PostgreSQL executor releases a stalled startup handshake within its connection deadline", { timeout: 12_000 }, async () => {
+  const sockets = new Set<net.Socket>();
+  const server = net.createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    // Deliberately accept TCP without replying to PostgreSQL's startup packet.
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const executor = await openPgExecutor({ url: `postgresql://test:test@127.0.0.1:${address.port}/unreachable`, ssl: false });
+  // A broken implementation still terminates cleanly and fails the elapsed assertion.
+  const watchdog = setTimeout(() => { for (const socket of sockets) socket.destroy(); }, 8_000);
+  const started = performance.now();
+  try {
+    await assert.rejects(executor.execute("SELECT 1", []), /timeout|timed out/i);
+    assert.ok(performance.now() - started < 7_000, "A stalled PG startup must not hang the refresh slot");
+  } finally {
+    clearTimeout(watchdog);
+    for (const socket of sockets) socket.destroy();
+    await executor.close?.();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test("PostgreSQL Content API uses positional parameters and native values", async () => {
   const calls: Array<{ sql: string; values: readonly unknown[] }> = [];

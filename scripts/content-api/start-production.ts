@@ -39,10 +39,21 @@ const server = await startContentApiServer({
   allowedHosts,
   allowedOrigins,
   allowMissingOrigin: readBooleanEnv("CONTENT_API_ALLOW_MISSING_ORIGIN", true),
+  newsCalendarRefreshIntervalMs: enabled ? readIntegerEnv("CONTENT_API_CALENDAR_REFRESH_INTERVAL_MS", 30_000) : undefined,
+  newsCalendarMaxStaleMs: readIntegerEnv("CONTENT_API_CALENDAR_MAX_STALE_MS", 120_000),
   onError: (error) => {
     const detail = error instanceof Error ? error.message : String(error);
     console.error(`content API read failed: ${detail.slice(0, 500)}`);
   },
+}).catch(async (error: unknown) => {
+  // A failed prime must release its database pool instead of leaving a
+  // non-listening process alive with resources held between service restarts.
+  try {
+    await repositoryHandle?.close();
+  } catch (closeError) {
+    console.error("content API startup cleanup failed", closeError);
+  }
+  throw error;
 });
 
 function shutdown(): void {

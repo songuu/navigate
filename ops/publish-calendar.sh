@@ -33,10 +33,11 @@ mkdir -m 0700 "$backup"
 mkdir "$backup/new" "$backup/old"
 tar -xzf "$archive" -C "$backup/new"
 files=(scripts/content-api/postgres-repository.ts scripts/content-api/postgres-repository.test.mts
+  scripts/content-api/server.ts scripts/content-api/server.test.mts scripts/content-api/start-production.ts
   database/005-news-calendar-rollups.sql database/verify-calendar-rollups.sql
   database/tests/news-calendar-fixtures.sql database/tests/news-calendar-rollups.sql
   ops/deploy.sh ops/publish-calendar.sh ops/test-calendar-postgres.sh
-  ops/verify-calendar-performance.mjs ops/CALENDAR-PERFORMANCE.md)
+  ops/verify-calendar-performance.mjs ops/content-api.env.example ops/CALENDAR-PERFORMANCE.md)
 for file in "${files[@]}"; do
   [[ -f "$backup/new/$file" && ! -L "$backup/new/$file" && ! -L "$current/$file" ]]
   if [[ -e "$current/$file" ]]; then
@@ -77,7 +78,8 @@ for attempt in $(seq 1 30); do
 done
 (( ready )) || { echo 'API did not become healthy after restart' >&2; exit 1; }
 cd "$current"
-# Health checks do not query PG. These five simultaneous requests are the first calendar reads.
+# Startup loads the snapshot before listening; health reads its ready state only.
+# These are the first user HTTP requests, with no HTTP prewarming.
 node ops/verify-calendar-performance.mjs http://127.0.0.1:5196 cold-start 2500 > "$backup/cold-start.json"
 date +%s > "$backup/cold-start-at"
 node ops/verify-live.mjs http://127.0.0.1:5196 > "$backup/api-verification.log" 2>&1
