@@ -28,7 +28,7 @@ export const categories = [
 
 const knownNames = new Map(Object.entries({
   'reddit.com': 'Reddit', 'juejin.im': '掘金', 'linux.do': 'LINUX DO',
-  'aihot.virxact.com': 'AI 热点', 'bestblogs.dev': 'BestBlogs', 'nodeseek.com': 'NodeSeek',
+  'aihot.virxact.com': 'AI 热点', 'aihot.news': 'AI 热点', 'bestblogs.dev': 'BestBlogs', 'nodeseek.com': 'NodeSeek',
   'codepen.io': 'CodePen', 'developer.mozilla.org': 'MDN Web Docs',
   'keepscreenon.com': 'Keep Screen On', 'deepwiki.com': 'DeepWiki', 'revezone.com': 'Revezone',
   'oschina.net': '开源中国', 'segmentfault.com': 'SegmentFault', 'excalidraw.com': 'Excalidraw',
@@ -45,7 +45,7 @@ const domainCategories = new Map(Object.entries({
   'publicdomainvectors.org': 'tools', 'mermaid.live': 'tools', 'smart-mermaid.aizhi.site': 'tools',
   'json.uiboy.com': 'tools', 'stitch.withgoogle.com': 'tools', 'chongbuluo.com': 'tools',
   'simonwillison.net': 'community',
-  'producthunt.com': 'news', 'aihot.virxact.com': 'news', 'news-digest-nine.vercel.app': 'news',
+  'producthunt.com': 'news', 'aihot.virxact.com': 'news', 'aihot.news': 'news', 'news-digest-nine.vercel.app': 'news',
   'informedainews.com': 'news', 'tophub.today': 'news', 'gsmarena.com': 'news',
   'notebookcheck.net': 'news', 'anandtech.com': 'news',
   'gcores.com': 'fun', 'epicgames.com': 'fun', 'ali213.fhyx.hk': 'fun', 'fhyx.hk': 'fun', 'cbaigui.com': 'fun',
