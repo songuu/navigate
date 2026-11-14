@@ -84,7 +84,7 @@ test('明确站点用途优先于旧 AI 和购物文件夹', () => {
     travel: ['back-on-track.eu'],
     tools: ['publicdomainvectors.org', 'mermaid.live', 'json.uiboy.com', 'stitch.withgoogle.com', 'www.chongbuluo.com'],
     community: ['simonwillison.net'],
-    news: ['www.producthunt.com', 'aihot.virxact.com', 'news-digest-nine.vercel.app', 'informedainews.com', 'tophub.today', 'www.gsmarena.com', 'www.notebookcheck.net', 'www.anandtech.com'],
+    news: ['www.producthunt.com', 'aihot.virxact.com', 'aihot.news', 'news-digest-nine.vercel.app', 'informedainews.com', 'tophub.today', 'www.gsmarena.com', 'www.notebookcheck.net', 'www.anandtech.com'],
     fun: ['www.gcores.com', 'www.epicgames.com', 'ali213.fhyx.hk', 'www.cbaigui.com'],
     reading: ['ebook.huzerui.com', 'orzbook.com'],
   };
